@@ -34,6 +34,14 @@ evaluation. Checkpoint storage details are kept in
 - Grip-residual collection started on 2026-08-27. The numeric head and
   shadow-inference path exist, but no head checkpoint has been trained yet.
   Continue reviewed collection before fitting it.
+- Superseded on 2026-09-01. The `0.2` intervention step is about one quarter of
+  the gripper's command-to-readback offset and produced no resolvable jaw
+  motion, so the 2026-08-31 A/B slots measure a null intervention. ACT was also
+  confirmed to stall on an inadequate grasp and to resume when it is corrected,
+  which supplies an objective self-generated label. The agreed design is one
+  head emitting a single corrective `Δq` with two-sided supervision, not two
+  heads. Calibrate the deadband and beat a no-learning stall-and-tighten
+  baseline before fitting anything. See the 2026-09-01 section.
 
 ## Artifact state
 
@@ -976,8 +984,9 @@ threshold. This remains NO-GO for actuation. The temporary checkpoint is
 
 ## Targeted post-lift A/B collection and hardware stop on 2026-08-31
 
-This is the current handoff state and supersedes the earlier plan to continue
-hardware trials immediately. The active ACT checkpoint and body contract were
+This section's trial records stand, but its plan is superseded by the
+2026-09-01 section: the `0.2` step moved no jaw, so these four slots measure a
+null intervention and the eight-slot schedule must not be resumed at that step. The active ACT checkpoint and body contract were
 not changed: fixed middle start
 `[1.32,-38.42,42.68,86.20,0.92,99.34]`, prefix 14, action repeat 2, 300 ACT
 steps, and `delta_q=0` before any manual post-lift intervention. The grip head
@@ -1064,3 +1073,190 @@ cable segment; persistent single-ID loss after that implicates the motor or
 its electronics. Before any arm-enabled run, a motor scan/handshake must find
 all IDs 1-6 reliably. Resume the remaining A/B schedule only if the operator
 later chooses to continue; do not restart it automatically.
+
+## Null-intervention finding and single-head design on 2026-09-01
+
+This section supersedes the plan in the 2026-08-31 targeted A/B section. That
+section's trial records stand as facts; its plan to continue the eight-slot
+schedule at a `0.2` step does not.
+
+### Paths after the repository split
+
+Artifacts moved during the 2026-09-01 repository separation and earlier sections
+of this file still cite pre-migration paths. Current locations:
+
+| Cited in earlier sections as | Now at |
+| --- | --- |
+| `evidence/<group>` | `local/evidence/<group>` |
+| `training/phase_c_recovery_minimal` | `local/training_runs/phase_c_recovery_minimal` |
+| `training/phase_c_grip_residual` | `local/training_runs/phase_c_grip_residual` |
+
+### The +0.2 intervention produced no measurable jaw motion
+
+Gripper readback was compared against the commanded target over the 15 s after
+each intervention, from `control.jsonl` in `local/evidence/phase_c_recovery_minimal`.
+
+| Trial | Reviewed label | Δ command | Δ readback | Distinct readback values |
+| --- | --- | ---: | ---: | ---: |
+| trial03 | `loosen_stable` | +0.186 | +0.000 | 1 |
+| trial04 retry01 | `loosen_stable` | +0.050 | +0.000 | 1 |
+| trial02 retry03 | `loosen_unstable` | +0.193 | -0.047 | 2 |
+| trial01 | `hold_unstable` | +0.297 | -0.389 | 2 |
+| trial05 | tighten x33 | -5.422 | -4.175 | 26 |
+
+In trial03 the readback held at exactly `26.426` for all 162 remaining control
+steps (standard deviation `0.000`) while the standing command-to-readback offset
+was `0.787`. The `0.2` step is about one quarter of that offset. Both
+`loosen_stable` outcomes therefore record a grasp whose jaw never moved, not a
+grasp that survived loosening. Only the trial05 tighten ramp, at
+`Δ command -5.4`, moved the jaw by an amount the encoder could resolve.
+
+The four completed A/B slots consequently measure a null intervention. They must
+not be used to fit or validate any loosening decision, and the eight-slot
+schedule must not be resumed at a `0.2` step. A deadband calibration is required
+first: sweep `Δq` over `{0.5, 1, 2, 3, 5}` in `gripper_only` mode on a held
+carton and record the smallest step that produces resolvable readback motion.
+That sweep also establishes whether `present_load` and `present_current` respond
+to grip depth at all.
+
+### Additional defects in the 2026-08-31 A/B collection
+
+Independent of the null-intervention finding, four issues limit that collection:
+
+- The post-event observation window was not standardized and correlates with the
+  label. The two `stable` slots were observed for `16.6 s` and `32.0 s`; the one
+  `loosen_unstable` slot was observed for `44.7 s` and its reviewed failure was a
+  *gradual* slip. trial03's window is the shortest of the four, so its `stable`
+  label is not comparable and should read `inconclusive`.
+- The intervention instant was uncontrolled, ranging from `16.8 s` to `46.4 s`
+  after start. The same nominal step was applied at very different points of the
+  ACT trajectory. trial01 and trial02 retry03 also released back to the buffered
+  ACT trajectory mid-observation while trial03 and trial04 did not.
+- Retrying the same assignment until ACT lifts conditions the A/B population on
+  lift success, which selects for tighter initial grasps, which is where
+  loosening is safest. Five of ten attempts with a known outcome were no-lift.
+- Labels were assigned by unblinded operator review after the trial
+  (`annotation_method: operator_review_after_trial`) on a continuous quantity.
+  Both dual-view videos are retained, so a blinded re-scoring against a defined
+  displacement criterion is possible offline.
+
+Statistical power was never present: four slots split three loosen to one hold.
+Treat the collection as exploratory, not as a hypothesis test.
+
+Two data-quality notes. `present_load` is quantized to multiples of four and is
+close to a per-trial constant while holding; in trial03 it equalled `64.0` at
+every sample in the 15 s after the intervention, and `present_current` spans only
+`0` to `16` across trials. A head trained on per-trial windows can fit trial
+identity through this channel, which is a plausible explanation for offline load
+MAE beating the constant baseline while action selection stayed unreliable. It
+also makes the `abs(Present_Load) > 60` gate from the same day suspect. Separately,
+every manifest in this group records `"grip_candidate_load_gate": true` although
+this file describes the runs as having no load gate; no head was live in any run
+(`grip_candidate_trial_model` and `grip_residual_shadow_model` are both `null`),
+so runtime behaviour was unaffected, but the field is misleading to later readers.
+
+### ACT stalls on an inadequate grasp and resumes when it is corrected
+
+trial05 confirms that ACT withholds the lift rather than failing open-loop. From
+`41.2 s` to `50.1 s` the `shoulder_lift` and `elbow_flex` commands were bit-identical
+at `-19.32` and `35.82` for about nine seconds. Manual tightening moved the gripper
+readback from `31.93` to `27.28`, and within one second of that the body commands
+resumed a large coordinated motion that lifted the carton.
+
+| Elapsed | `shoulder_lift` cmd | `elbow_flex` cmd | Gripper readback |
+| ---: | ---: | ---: | ---: |
+| 41.2 | -19.32 | 35.82 | 31.93 |
+| 50.1 | -19.32 | 35.82 | 27.28 |
+| 50.9 | -20.29 | 35.22 | 27.21 |
+| 56.5 | -26.46 | 18.90 | 26.43 |
+| 59.7 | -21.37 | 8.67 | 26.43 |
+
+Two consequences. The stall is detectable from the log without operator
+judgement, as the rolling variance of the non-gripper joint commands falls to
+zero, which supplies an objective self-generated label. And the lift threshold
+for this trial sits at a gripper readback near `27.2`.
+
+ACT's autonomous closing depth, taken as the tightest commanded gripper value
+before any intervention, spans `23.4` to `30.7` across the eleven runs, about
+`7.3` units. All five runs that lifted closed to `25.40` or tighter; three of the
+five that failed closed no tighter than `26.04`. Two failures at `24.69` and
+`25.27` overlap the success range, so this is a threshold band near `25.4` to
+`26.0`, not a clean separator. The `0.2` step is `1/36` of the observed spread.
+
+### One head, one scalar, two-sided supervision
+
+"Too loose to lift" and "too tight" are the two ends of the same scalar, so they
+are one regression target rather than two classifiers. Two heads would be
+mutually exclusive by construction and would require an arbiter that has to solve
+the original problem; they would also split an already small dataset and could
+not encode the monotonicity of lift failure and crush in grip depth. The intended
+form is a single head emitting one corrective `Δq`, sized in the units the
+deadband calibration establishes, applied once and then handed back to ACT, and
+trained with a two-sided hinge so each trial needs only a one-sided label.
+
+The two bounds are not equally observable. The loose bound is self-labelling,
+because the objective event is ACT resuming the lift, and hard negatives already
+exist. The tight bound currently has no labelled example and possibly no sensor:
+no run in this group was reviewed as crushed, and the load and current channels
+behave as described above. Until a crush criterion is shown to be measurable,
+train only the loose bound and enforce the tight side as a fixed floor at the
+tightest depth seen in training. If a per-grasp slip boundary becomes available,
+an appropriate depth can be defined relative to it as a fixed margin, which
+removes the need for a crush sensor.
+
+### Collection protocol for the next round
+
+Run ACT normally and branch on its own behaviour, so that every trial yields data
+instead of the current 50% no-lift loss, and keep the ACT visual distribution.
+
+1. If ACT stalls, ramp tighten at the calibrated step until the stall breaks and
+   the lift starts. Record that depth as the lift boundary.
+2. After a lift, from either branch, ramp loosen at the calibrated step until the
+   carton drops. Record that depth as the slip boundary.
+
+Continuing into step 2 on the tighten branch is what makes the two boundaries
+paired within one grasp. Branching on outcome alone would measure the lift
+boundary only on loose grasps and the slip boundary only on tight ones, on
+disjoint populations, and the two could never be compared. The comparison matters
+because their order is not fixed: trial01 lifted and then slipped, so its lift
+boundary was looser than its slip boundary, while trial05 suggests the reverse.
+The sign and size of that gap is what says whether ACT's internal threshold is
+conservative or permissive, and therefore in which direction a head should act.
+
+Both stopping criteria are events rather than fixed windows, which is what makes
+this protocol immune to the observation-window confound above. Record readback
+rather than commanded value, log ramp direction because a loosen ramp entered
+from a tightened state carries hysteresis, and note that a ramp measures a
+slightly conservative slip boundary compared with a static hold; a staircase that
+dwells at each step separates that. Videos are `10 fps` at `640x480` and are
+locked one frame per control step, which resolves a gradual precursor but is
+marginal for timing the drop itself.
+
+Analysis is offline. The drop is the label and the frames before it are the
+features, which avoids defining slip visually and then validating it visually.
+The existing `lower_vs_upper_flow_y` and `vertical_strain` features in
+`grip_runtime.py` were designed for exactly this relative motion and have never
+been tested against a real signal. Score `position_lag` and the
+readback-to-command error as a free proprioceptive comparison: if they separate
+slip as well as the fourteen visual features, the visual path is unnecessary.
+
+This protocol produces no crush samples, since both branches move toward the
+loose side. That is accepted for now under the margin definition above.
+
+### Next gates after 2026-09-01
+
+1. Calibrate the gripper deadband in `gripper_only` mode and report the smallest
+   step with resolvable readback motion, plus whether load or current respond.
+2. Implement stall detection and a tighten ramp as a controller with no learned
+   component, and measure the no-lift rate against the current 50%. Any head must
+   beat this baseline to be worth deploying; otherwise it is an offline metric
+   improvement over three lines of control logic.
+3. Collect paired lift and slip boundaries with the two-branch protocol.
+4. Before training any head, report single-feature AUC for the lift and slip
+   events over the six proprioceptive and fourteen visual features. Do not run
+   another fixed 50-step training until a feature is shown to carry signal.
+5. Re-score the five reviewed 2026-08-31 videos blind against a defined
+   displacement criterion, and downgrade trial03 to `inconclusive`.
+
+No checkpoint is approved for actuation. The grip head still must not command the
+motor.
