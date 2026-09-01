@@ -11,6 +11,11 @@ dependencies = [
   "numpy",
   "scipy",
   "matplotlib",
+  # grip/runtime.py: the residual and candidate heads are torch modules, and
+  # its optical-flow features need cv2. Both already arrive with lerobot, but
+  # this package imports them directly, so it declares them.
+  "torch",
+  "opencv-python",
   "lerobot==0.5.2",
   "webcam-input==0.1.0",
 ]

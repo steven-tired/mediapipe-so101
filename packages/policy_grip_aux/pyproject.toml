@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_policy_grip_aux"
+version = "0.1.0"
+description = "ACT and Diffusion Policy wrappers with privileged PV grip-intent supervision"
+requires-python = ">=3.12"
+dependencies = ["lerobot"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["lerobot_policy_grip_aux*"]

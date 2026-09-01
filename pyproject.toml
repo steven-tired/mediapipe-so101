@@ -6,10 +6,12 @@ norecursedirs = ["local", ".git", "*.egg-info", "__pycache__"]
 pythonpath = [
   "packages/webcam_input/src",
   "packages/so101_teleop/src",
+  "packages/policy_grip_aux/src",
   "integrations/pressurevision/src",
 ]
 testpaths = [
   "packages/webcam_input/tests",
   "packages/so101_teleop/tests",
+  "packages/policy_grip_aux/tests",
   "integrations/pressurevision/tests",
 ]

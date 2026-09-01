@@ -1,0 +1,497 @@
+"""Deploy-time grip context and the opt-in low-level gripper controller."""
+
+from __future__ import annotations
+
+from collections import deque
+from dataclasses import dataclass
+import math
+from pathlib import Path
+
+import cv2
+import numpy as np
+import torch
+
+
+GRIP_CONTEXTS = ("soft", "hard", "unknown")
+GRIP_CONTEXT_FEATURES = tuple(f"grip_context.{name}" for name in GRIP_CONTEXTS)
+GRIP_RESIDUAL_DIRECTIONS = ("tighten", "hold", "loosen")
+GRIP_RESIDUAL_FEATURES = (
+    "policy_target",
+    "command_target",
+    "actual_pos",
+    "present_current",
+    "present_load",
+    "position_lag",
+)
+GRIP_CANDIDATE_DELTAS = (-0.2, 0.0, 0.2)
+GRIP_VISUAL_FEATURES_PER_VIEW = (
+    "motion_mean",
+    "motion_p90",
+    "flow_magnitude_p90",
+    "lower_vs_upper_flow_y",
+    "lower_vs_upper_flow_x",
+    "horizontal_strain",
+    "vertical_strain",
+)
+GRIP_VISUAL_FEATURES = tuple(
+    f"{view}.{name}"
+    for view in ("front", "side")
+    for name in GRIP_VISUAL_FEATURES_PER_VIEW
+)
+GRIP_CANDIDATE_FEATURES = GRIP_RESIDUAL_FEATURES + GRIP_VISUAL_FEATURES
+
+
+def grip_context_vector(context: str) -> np.ndarray:
+    if context not in GRIP_CONTEXTS:
+        raise ValueError(f"unknown grip context {context!r}")
+    return np.asarray([float(context == name) for name in GRIP_CONTEXTS], dtype=np.float32)
+
+
+def append_grip_context(state: np.ndarray, *, context: str, expected_dim: int) -> np.ndarray:
+    """Append context for new policies while remaining compatible with legacy 6D policies."""
+    state = np.asarray(state, dtype=np.float32).reshape(-1)
+    if expected_dim == state.size:
+        return state
+    if expected_dim == state.size + len(GRIP_CONTEXTS):
+        return np.concatenate((state, grip_context_vector(context)))
+    raise ValueError(
+        f"policy expects observation.state dim {expected_dim}, but robot supplies "
+        f"{state.size} motor values or {state.size + len(GRIP_CONTEXTS)} values with grip_context"
+    )
+
+
+@dataclass(frozen=True)
+class GripFeedbackConfig:
+    """Calibrated light-to-hard range used after the policy requests a grasp."""
+
+    light_pos: float
+    hard_pos: float
+    max_step: float = 2.0
+    grasp_enter: float = 30.0
+    grasp_exit: float = 65.0
+
+    def __post_init__(self) -> None:
+        values = (self.light_pos, self.hard_pos, self.max_step, self.grasp_enter, self.grasp_exit)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("grip feedback values must be finite")
+        if not 0.0 <= self.hard_pos < self.light_pos <= 100.0:
+            raise ValueError("grip feedback requires 0 <= hard_pos < light_pos <= 100")
+        if self.max_step <= 0.0:
+            raise ValueError("max_step must be positive")
+        if not self.grasp_enter < self.grasp_exit:
+            raise ValueError("grasp_enter must be smaller than grasp_exit")
+
+
+class GripFeedbackController:
+    """Use the legacy gripper action as an open/grasp gate, not a position target.
+
+    While open, the original policy command passes through. Once grasp is latched, the
+    auxiliary intent selects a calibrated light-to-hard target and actual position
+    readback closes the loop. This controller is deliberately opt-in at deployment.
+    """
+
+    def __init__(self, config: GripFeedbackConfig):
+        self.config = config
+        self.grasp_latched = False
+
+    def reset(self) -> None:
+        self.grasp_latched = False
+
+    def update(
+        self,
+        *,
+        policy_target: float,
+        grip_intent: float,
+        actual_pos: float,
+        force_grasp: bool = False,
+    ) -> float:
+        values = (policy_target, grip_intent, actual_pos)
+        if not all(math.isfinite(float(value)) for value in values):
+            raise ValueError("grip controller inputs must be finite")
+        cfg = self.config
+        policy_target = float(policy_target)
+        if force_grasp or (not self.grasp_latched and policy_target <= cfg.grasp_enter):
+            self.grasp_latched = True
+        elif self.grasp_latched and policy_target >= cfg.grasp_exit:
+            self.grasp_latched = False
+
+        if not self.grasp_latched:
+            return policy_target
+
+        intent = float(np.clip(grip_intent, 0.0, 1.0))
+        desired = cfg.light_pos + intent * (cfg.hard_pos - cfg.light_pos)
+        command = float(actual_pos) + float(np.clip(desired - float(actual_pos), -cfg.max_step, cfg.max_step))
+        return float(np.clip(command, 0.0, 100.0))
+
+
+class GripResidualHead(torch.nn.Module):
+    """Small numeric head for a signed gripper suggestion and grasp stability."""
+
+    def __init__(self, *, history_steps: int = 4, hidden_dim: int = 32):
+        super().__init__()
+        if history_steps <= 0 or hidden_dim <= 0:
+            raise ValueError("grip residual dimensions must be positive")
+        self.history_steps = history_steps
+        self.hidden = torch.nn.Linear(history_steps * len(GRIP_RESIDUAL_FEATURES), hidden_dim)
+        self.output = torch.nn.Linear(hidden_dim, len(GRIP_RESIDUAL_DIRECTIONS) + 1)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.output(torch.relu(self.hidden(features.flatten(start_dim=1))))
+
+
+class GripResidualShadow:
+    """Run a trained residual head for logging without returning a motor command."""
+
+    def __init__(
+        self,
+        *,
+        head: GripResidualHead,
+        feature_mean: torch.Tensor,
+        feature_std: torch.Tensor,
+    ):
+        self.head = head.eval()
+        self.feature_mean = feature_mean.float()
+        self.feature_std = feature_std.float()
+        self.history = deque(maxlen=head.history_steps)
+
+    @classmethod
+    def from_checkpoint(cls, path: str | Path) -> "GripResidualShadow":
+        checkpoint = torch.load(Path(path), map_location="cpu", weights_only=True)
+        history_steps = int(checkpoint["history_steps"])
+        hidden_dim = int(checkpoint["hidden_dim"])
+        feature_mean = torch.as_tensor(checkpoint["feature_mean"], dtype=torch.float32)
+        feature_std = torch.as_tensor(checkpoint["feature_std"], dtype=torch.float32)
+        expected_shape = (len(GRIP_RESIDUAL_FEATURES),)
+        if feature_mean.shape != expected_shape or feature_std.shape != expected_shape:
+            raise ValueError(f"grip residual normalization must have shape {expected_shape}")
+        if not torch.isfinite(feature_mean).all() or not torch.isfinite(feature_std).all():
+            raise ValueError("grip residual normalization must be finite")
+        if torch.any(feature_std <= 0.0):
+            raise ValueError("grip residual feature_std must be positive")
+        head = GripResidualHead(history_steps=history_steps, hidden_dim=hidden_dim)
+        head.load_state_dict(checkpoint["model_state_dict"])
+        return cls(head=head, feature_mean=feature_mean, feature_std=feature_std)
+
+    def observe(
+        self,
+        *,
+        policy_target: float,
+        command_target: float,
+        actual_pos: float,
+        present_current: float,
+        present_load: float,
+        position_lag: float,
+    ) -> dict | None:
+        values = np.asarray(
+            [
+                policy_target,
+                command_target,
+                actual_pos,
+                present_current,
+                present_load,
+                position_lag,
+            ],
+            dtype=np.float32,
+        )
+        if not np.isfinite(values).all():
+            raise ValueError("grip residual shadow inputs must be finite")
+        self.history.append(torch.from_numpy(values))
+        if len(self.history) < self.history.maxlen:
+            return None
+
+        features = torch.stack(tuple(self.history))
+        features = (features - self.feature_mean) / self.feature_std
+        with torch.inference_mode():
+            prediction = self.head(features.unsqueeze(0))[0]
+            direction_probabilities = torch.softmax(prediction[:3], dim=0)
+            stable_probability = torch.sigmoid(prediction[3])
+        direction_index = int(direction_probabilities.argmax())
+        return {
+            "direction": GRIP_RESIDUAL_DIRECTIONS[direction_index],
+            "delta_q_sign": direction_index - 1,
+            "direction_probabilities": {
+                name: float(direction_probabilities[index])
+                for index, name in enumerate(GRIP_RESIDUAL_DIRECTIONS)
+            },
+            "grasp_stable_probability": float(stable_probability),
+            "prediction_for": "next_control_step",
+        }
+
+
+def _grip_view_motion_features(previous_rgb: np.ndarray, current_rgb: np.ndarray) -> np.ndarray:
+    """Measure image motion plus coarse slip/deformation proxies in one fixed view."""
+    previous_rgb = np.asarray(previous_rgb)
+    current_rgb = np.asarray(current_rgb)
+    if previous_rgb.shape != current_rgb.shape or previous_rgb.ndim != 3:
+        raise ValueError("grip video frames must be same-shaped HWC images")
+
+    previous = cv2.resize(cv2.cvtColor(previous_rgb, cv2.COLOR_RGB2GRAY), (160, 120))
+    current = cv2.resize(cv2.cvtColor(current_rgb, cv2.COLOR_RGB2GRAY), (160, 120))
+    flow = cv2.calcOpticalFlowFarneback(
+        previous,
+        current,
+        None,
+        0.5,
+        2,
+        15,
+        3,
+        5,
+        1.2,
+        0,
+    )
+    difference = np.abs(current.astype(np.float32) - previous.astype(np.float32)) / 255.0
+    magnitude = np.linalg.norm(flow, axis=2)
+
+    upper = flow[:42, 56:104]
+    lower = flow[66:108, 24:144]
+    left, right = lower[:, :60], lower[:, 60:]
+    top, bottom = lower[:21], lower[21:]
+    features = np.asarray(
+        [
+            difference.mean(),
+            np.quantile(difference, 0.9),
+            np.quantile(magnitude, 0.9),
+            np.median(lower[..., 1]) - np.median(upper[..., 1]),
+            np.median(lower[..., 0]) - np.median(upper[..., 0]),
+            np.median(right[..., 0]) - np.median(left[..., 0]),
+            np.median(bottom[..., 1]) - np.median(top[..., 1]),
+        ],
+        dtype=np.float32,
+    )
+    if not np.isfinite(features).all():
+        raise ValueError("grip video features must be finite")
+    return features
+
+
+def grip_visual_features(
+    *,
+    previous_front_rgb: np.ndarray,
+    current_front_rgb: np.ndarray,
+    previous_side_rgb: np.ndarray,
+    current_side_rgb: np.ndarray,
+) -> np.ndarray:
+    """Return fixed, low-dimensional motion features for slip/deformation observation."""
+    return np.concatenate(
+        (
+            _grip_view_motion_features(previous_front_rgb, current_front_rgb),
+            _grip_view_motion_features(previous_side_rgb, current_side_rgb),
+        )
+    )
+
+
+class GripCandidateHead(torch.nn.Module):
+    """Score post-action stability for one proposed gripper delta q."""
+
+    def __init__(self, *, history_steps: int = 4, hidden_dim: int = 32):
+        super().__init__()
+        if history_steps <= 0 or hidden_dim <= 0:
+            raise ValueError("grip candidate dimensions must be positive")
+        self.history_steps = history_steps
+        input_dim = history_steps * len(GRIP_CANDIDATE_FEATURES) + 1
+        self.hidden = torch.nn.Linear(input_dim, hidden_dim)
+        self.output = torch.nn.Linear(hidden_dim, 1)
+
+    def forward(self, features: torch.Tensor, delta_q: torch.Tensor) -> torch.Tensor:
+        candidate = delta_q.reshape(-1, 1) / 0.2
+        inputs = torch.cat((features.flatten(start_dim=1), candidate), dim=1)
+        return self.output(torch.relu(self.hidden(inputs))).squeeze(1)
+
+
+def select_stability_effort_candidate(
+    stability_probabilities: dict[float, float],
+    predicted_loads: dict[float, float],
+    *,
+    present_load: float,
+    minimum_probability: float,
+    minimum_load_for_loosen: float,
+) -> float:
+    """Select hold/loosen exactly as evaluated by the post-lift offline gate."""
+    expected = {0.0, 0.2}
+    if set(stability_probabilities) != expected or set(predicted_loads) != expected:
+        raise ValueError("post-lift candidate scores must cover hold and +0.2")
+    eligible = [
+        delta
+        for delta in (0.0, 0.2)
+        if stability_probabilities[delta] >= minimum_probability
+        and (delta == 0.0 or abs(float(present_load)) > minimum_load_for_loosen)
+    ]
+    return min(eligible, key=predicted_loads.get) if eligible else 0.0
+
+
+class GripCandidateScorer:
+    """Load the post-lift stability/effort heads and score one telemetry context."""
+
+    def __init__(
+        self,
+        *,
+        stability_head: GripCandidateHead,
+        effort_head: GripCandidateHead,
+        feature_mean: torch.Tensor,
+        feature_std: torch.Tensor,
+        effort_mean: float,
+        effort_std: float,
+        minimum_probability: float,
+        minimum_load_for_loosen: float,
+        visual_gap_frames: int,
+    ):
+        self.stability_head = stability_head.eval()
+        self.effort_head = effort_head.eval()
+        self.feature_mean = feature_mean.float()
+        self.feature_std = feature_std.float()
+        self.effort_mean = float(effort_mean)
+        self.effort_std = float(effort_std)
+        self.minimum_probability = float(minimum_probability)
+        self.minimum_load_for_loosen = float(minimum_load_for_loosen)
+        self.visual_gap_frames = int(visual_gap_frames)
+        self.history = deque(maxlen=stability_head.history_steps)
+
+    @classmethod
+    def from_checkpoint(cls, path: str | Path) -> "GripCandidateScorer":
+        checkpoint = torch.load(Path(path), map_location="cpu", weights_only=True)
+        if checkpoint.get("model_type") != "action_conditioned_grip_stability_effort_v1":
+            raise ValueError("checkpoint is not a stability/effort grip candidate model")
+        if checkpoint.get("training_view") != "post_lift_hold_loosen":
+            raise ValueError("bounded trial requires the post-lift-only training view")
+        if not checkpoint.get("offline_gate_pass", False):
+            raise ValueError("checkpoint did not pass its offline gate")
+        if tuple(float(value) for value in checkpoint["candidate_deltas"]) != (0.0, 0.2):
+            raise ValueError("bounded trial supports only hold and +0.2")
+
+        history_steps = int(checkpoint["history_steps"])
+        hidden_dim = int(checkpoint["hidden_dim"])
+        feature_mean = torch.as_tensor(checkpoint["feature_mean"], dtype=torch.float32)
+        feature_std = torch.as_tensor(checkpoint["feature_std"], dtype=torch.float32)
+        expected_shape = (len(GRIP_CANDIDATE_FEATURES),)
+        if feature_mean.shape != expected_shape or feature_std.shape != expected_shape:
+            raise ValueError(f"grip candidate normalization must have shape {expected_shape}")
+        if tuple(checkpoint["feature_names"]) != GRIP_CANDIDATE_FEATURES:
+            raise ValueError("grip candidate feature order does not match runtime")
+
+        stability_head = GripCandidateHead(history_steps=history_steps, hidden_dim=hidden_dim)
+        effort_head = GripCandidateHead(history_steps=history_steps, hidden_dim=hidden_dim)
+        stability_head.load_state_dict(checkpoint["stability_model_state_dict"])
+        effort_head.load_state_dict(checkpoint["effort_model_state_dict"])
+        policy = checkpoint["selection_policy"]
+        return cls(
+            stability_head=stability_head,
+            effort_head=effort_head,
+            feature_mean=feature_mean,
+            feature_std=feature_std,
+            effort_mean=float(checkpoint["effort_mean"]),
+            effort_std=float(checkpoint["effort_std"]),
+            minimum_probability=float(policy["minimum_probability"]),
+            minimum_load_for_loosen=float(policy["minimum_present_load_for_loosen"]),
+            visual_gap_frames=int(checkpoint["visual_gap_frames"]),
+        )
+
+    def observe(
+        self,
+        *,
+        policy_target: float,
+        command_target: float,
+        actual_pos: float,
+        present_current: float,
+        present_load: float,
+        position_lag: float,
+        previous_front_rgb: np.ndarray,
+        current_front_rgb: np.ndarray,
+        previous_side_rgb: np.ndarray,
+        current_side_rgb: np.ndarray,
+        use_load_gate: bool = True,
+    ) -> dict | None:
+        numeric = np.asarray(
+            [
+                policy_target,
+                command_target,
+                actual_pos,
+                present_current,
+                present_load,
+                position_lag,
+            ],
+            dtype=np.float32,
+        )
+        visual = grip_visual_features(
+            previous_front_rgb=previous_front_rgb,
+            current_front_rgb=current_front_rgb,
+            previous_side_rgb=previous_side_rgb,
+            current_side_rgb=current_side_rgb,
+        )
+        self.history.append(torch.from_numpy(np.concatenate((numeric, visual))))
+        if len(self.history) < self.history.maxlen:
+            return None
+
+        features = torch.stack(tuple(self.history))
+        features = (features - self.feature_mean) / self.feature_std
+        probabilities: dict[float, float] = {}
+        predicted_loads: dict[float, float] = {}
+        with torch.inference_mode():
+            for delta in (0.0, 0.2):
+                candidate = torch.tensor([delta], dtype=torch.float32)
+                context = features.unsqueeze(0)
+                probabilities[delta] = float(torch.sigmoid(self.stability_head(context, candidate)))
+                predicted_loads[delta] = float(
+                    self.effort_head(context, candidate) * self.effort_std + self.effort_mean
+                )
+        selected = select_stability_effort_candidate(
+            probabilities,
+            predicted_loads,
+            present_load=present_load,
+            minimum_probability=self.minimum_probability,
+            minimum_load_for_loosen=(self.minimum_load_for_loosen if use_load_gate else -1.0),
+        )
+        return {
+            "selected_delta_q": selected,
+            "stability_probabilities": {f"{delta:+.1f}": probabilities[delta] for delta in (0.0, 0.2)},
+            "predicted_loads": {f"{delta:+.1f}": predicted_loads[delta] for delta in (0.0, 0.2)},
+            "present_load_abs": abs(float(present_load)),
+            "load_gate_enabled": bool(use_load_gate),
+            "minimum_present_load_for_loosen": self.minimum_load_for_loosen,
+            "prediction_for": "next_control_step",
+        }
+
+
+def select_grip_candidate(
+    stability_probabilities: dict[float, float],
+    *,
+    supported_deltas: set[float],
+    stable_lift_seen: bool,
+    minimum_probability: float = 0.65,
+    minimum_hold_advantage: float = 0.10,
+) -> float:
+    """Choose a supported candidate conservatively; uncertainty falls back to hold."""
+    if set(stability_probabilities) != set(GRIP_CANDIDATE_DELTAS):
+        raise ValueError("stability probabilities must cover all grip candidate deltas")
+    if not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in stability_probabilities.values()):
+        raise ValueError("stability probabilities must be finite values in [0, 1]")
+
+    allowed = {delta for delta in supported_deltas if delta in GRIP_CANDIDATE_DELTAS}
+    allowed.add(0.0)
+    if not stable_lift_seen:
+        allowed.discard(0.2)
+    best = max(allowed, key=lambda delta: stability_probabilities[delta])
+    if best == 0.0:
+        return 0.0
+    if stability_probabilities[best] < minimum_probability:
+        return 0.0
+    if stability_probabilities[best] - stability_probabilities[0.0] < minimum_hold_advantage:
+        return 0.0
+    return best
+
+
+def pv_teacher_label(reading) -> tuple[np.ndarray, np.ndarray]:
+    """Convert one live PV reading into the dataset target and its validity mask."""
+    valid = bool(
+        reading is not None
+        and getattr(reading, "active", False)
+        and getattr(reading, "available", False)
+        and getattr(reading, "fresh", True)
+        and getattr(reading, "status", None)
+        not in {"pv_stale", "pv_unavailable", "pv_time_skew", "pressure_error", "pressure_unavailable"}
+    )
+    value = float(getattr(reading, "pressure_0_1", 0.0)) if valid else 0.0
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        valid, value = False, 0.0
+    return (
+        np.asarray([value], dtype=np.float32),
+        np.asarray([float(valid)], dtype=np.float32),
+    )
