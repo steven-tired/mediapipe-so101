@@ -38,7 +38,8 @@ from ..paths import urdf_path
 ARM_PORT = "/dev/ttyACM0"
 ARM_ID = "so101_follower_1"
 CAMERA_INDEX = 0
-URDF_PATH = str(urdf_path())
+# Resolved lazily inside main(): urdf_path() raises when SO-ARM100 is not configured,
+# and importing this module must not require a configured robot.
 # None on purpose: setting it makes send_action do a SECOND per-frame Present_Position read on a
 # flaky bus. Per-step motion is capped by the controller's EMA + slew-limit instead.
 MAX_RELATIVE_TARGET = None
@@ -57,6 +58,34 @@ def read_positions(robot, tries=12):
             time.sleep(0.1)
     raise ConnectionError("Arm position read kept failing -- check the USB cable/port "
                           "(try a direct port instead of the shared hub).")
+
+
+def disconnect_robot_safely(robot) -> None:
+    """Close fully or partially connected LeRobot resources without masking failures."""
+    try:
+        if getattr(robot, "is_connected", False):
+            robot.disconnect()
+    except Exception as exc:
+        print(f"[cleanup] robot disconnect failed: {exc}")
+
+    for camera in getattr(robot, "cameras", {}).values():
+        try:
+            if getattr(camera, "is_connected", False):
+                camera.disconnect()
+        except Exception as exc:
+            print(f"[cleanup] camera disconnect failed: {exc}")
+
+    bus = getattr(robot, "bus", None)
+    try:
+        if bus is not None and getattr(bus, "is_connected", False):
+            disable_torque = getattr(
+                getattr(robot, "config", None),
+                "disable_torque_on_disconnect",
+                False,
+            )
+            bus.disconnect(disable_torque=disable_torque)
+    except Exception as exc:
+        print(f"[cleanup] robot bus disconnect failed: {exc}")
 
 
 def main():
@@ -86,7 +115,7 @@ def main():
     # LeRobot default servo PID is good enough (verified) -- no tuned-PID re-apply.
 
     motors = list(robot.bus.motors.keys())
-    kin = RobotKinematics(urdf_path=URDF_PATH, target_frame_name="gripper_frame_link", joint_names=motors)
+    kin = RobotKinematics(urdf_path=str(urdf_path()), target_frame_name="gripper_frame_link", joint_names=motors)
     controller = WebcamEEController(robot, kin, cfg, use_oak=use_oak)
 
     # Ramp gently to the down ready pose (repeat each step so slow joints can follow), then build

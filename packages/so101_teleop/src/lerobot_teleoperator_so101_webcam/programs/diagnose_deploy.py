@@ -26,11 +26,10 @@ from lerobot.cameras.opencv import OpenCVCameraConfig
 from lerobot.common.control_utils import predict_action
 from lerobot.robots.so_follower.config_so_follower import SO101FollowerConfig
 
-from record_so101_ee import ResilientSOFollower, _read_positions, _ramp_to
-from deploy_so101_ee import (_load_policy, _apply_diffusion_overrides, _ready_pose, ARM_ID,
-
 from ..paths import evidence_dir
-                             WORKSPACE_CAM_PATH, WORKSPACE_CAM_FOURCC, FPS, DEFAULT_POLICY, TASK)
+from .record_so101_ee import ResilientSOFollower, _read_positions, _ramp_to
+from .deploy_so101_ee import (_load_policy, _apply_diffusion_overrides, _ready_pose, ARM_ID,
+                              WORKSPACE_CAM_PATH, WORKSPACE_CAM_FOURCC, FPS, DEFAULT_POLICY, TASK)
 
 
 def _safe_read(bus, reg):

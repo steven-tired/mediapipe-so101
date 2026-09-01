@@ -29,9 +29,9 @@ from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 from lerobot.robots.so_follower.config_so_follower import SO101FollowerConfig
 
 # Reuse the recorder's hardened robot + motion helpers (resilient per-frame read, gentle ramp).
-from record_so101_ee import ResilientSOFollower, _read_positions, _ramp_to
-from lerobot_teleoperator_so101_webcam.ee_control import joint_center
-from lerobot_teleoperator_so101_webcam.ee_controller import MIDDLE_WRIST_DOWN_DEG
+from .record_so101_ee import ResilientSOFollower, _read_positions, _ramp_to
+from ..ee_control import joint_center
+from ..ee_controller import MIDDLE_WRIST_DOWN_DEG
 
 ARM_ID = "so101_follower_1"
 WORKSPACE_CAM_PATH = "/dev/video2"   # Logitech C270 = observation.images.front (open by PATH)

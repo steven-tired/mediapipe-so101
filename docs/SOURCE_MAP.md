@@ -102,14 +102,56 @@ with `ir_`**, so a prefix rule would have leaked all of them.
 **Tests:** 31 in the source, 34 here (31 migrated + 3 new boundary tests), all
 passing under `.venv-lerobot`.
 
-### Deferred: recorder reconstruction
+### Recorder reconstruction
 
-`record_so101_ee.py` here is the base-checkout version. The
-`ir-hand-pressure-so101-teleop` worktree carries a restructured recorder (663 lines
-vs 481) with `build_dataset_features`, `_close_and_dispose_recording_session`, and
-an `ExitStack`-based `_run_recording`. That structure is wanted, but its IR sidecar
-plumbing threads through the teleoperator constructor, so it is reconstructed
-against the gripper contract rather than copied. See the grip-contract commit.
+`record_so101_ee.py` is **rewritten**, not copied: it is the
+`ir-hand-pressure-so101-teleop` worktree version (663 lines) reduced to 524 by
+removing IR and reconnected to the gripper contract. The worktree version was
+chosen over the base checkout because it carries `build_dataset_features`,
+`_close_and_dispose_recording_session`, and an `ExitStack`-based `_run_recording`
+that the base version lacks — 408 lines of non-IR structure.
+
+Removed:
+
+| Removed | Lines | Why |
+| --- | --- | --- |
+| `configure/stage/flush/_finalize_ir_telemetry`, and the `send_action`/`disconnect` overrides that existed only to drive them | 40 | IR sidecar plumbing. `ResilientSOFollower.get_observation`'s retry loop — the actual serial-drop fix — is kept. |
+| `RecordingIRRuntime`, `_env_enabled`, `pressure_runtime_from_env`, `pressure_source_from_env` | 63 | replaced by the gripper-controller seam |
+| sidecar staging in `get_action`, the sidecar tier in `disconnect` | 17 | ditto |
+
+Rewritten:
+
+- `WebcamEEController(..., pressure_source=, pressure_shadow=)` became
+  `WebcamEEController(..., gripper=)`. `_run_recording(resources, gripper=None)`
+  defaults to `MediaPipeGripperController`; the PV adapter is injected by the
+  composition entry point and can only change grip strength.
+- `WebcamEEJointTeleop` lost its `sidecar` parameter.
+- `from teleop_viz_ee import ...` became a relative import, and the
+  `sys.path.insert(_CHECKOUT_ROOT)` hack was dropped.
+- `disconnect_robot_safely` was ported into `teleop_viz_ee.py` from the worktree
+  (it is IR-free and the recorder needs it; the base version does not have it).
+- `log_say` → `print`. The worktree recorder still used text-to-speech; the base
+  one had been changed to terminal messages, and
+  `test_record_so101_ee_terminal_messages.py` guards that. The migration keeps the
+  base behaviour.
+- `ARM_PORT` and `WORKSPACE_CAM_PATH` take `SO101_ARM_PORT` / `SO101_WORKSPACE_CAM`
+  overrides, keeping the current by-id defaults.
+
+`ee_controller.py` is the base version (211 lines, zero IR/PV references). The
+worktree version is 1052 lines with 257 IR/PV references and is deliberately not
+used.
+
+### Import-time regression found during reconstruction
+
+`tests/test_programs_import_cleanly.py` was added after a defect this migration
+introduced: `URDF_PATH = str(urdf_path())` at module level made importing a program
+raise when SO-ARM100 was unconfigured, and nothing imported the programs, so 45
+passing tests missed it. The same test then caught two more: a syntax error where an
+inserted import landed inside a multi-line parenthesised import in
+`diagnose_deploy.py`, and bare sibling imports (`from record_so101_ee import ...`)
+in `deploy_so101_ee.py` and `diagnose_deploy.py` that only worked when the programs
+were loose scripts on `sys.path`. All are fixed; configuration errors now surface at
+run time, not import time.
 
 `ee_controller.py` is the base version (211 lines, zero IR/PV references). The
 worktree version is 1052 lines with 257 IR/PV references and is deliberately not
