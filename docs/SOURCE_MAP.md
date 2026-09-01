@@ -25,6 +25,42 @@ Disposition values:
 | `pyproject.toml` | — | new | pytest configuration only; the root is not an installable package |
 | `docs/CLAIMS_AND_GATES.md` | `docs/PV_HANDTRACK_PRIVILEGED_COMPARISON.md`, `docs/GENTLE_GRASP_OBJECTIVE_PLAN.md`, `docs/SO101_ORIENTATION_*` | rewritten | study status read from the source protocols at migration time: W0 frozen 2026-08-06, W1 complete, W3 pilot not run, v1.1 amendment not adopted |
 
+## packages/webcam_input
+
+Source: `webcam-input/` on branch `so101-webcam-diffusion` at 4e1f2fb.
+
+| Destination (under `packages/webcam_input/`) | Source (under `webcam-input/`) | Disposition |
+| --- | --- | --- |
+| `src/webcam_input/__init__.py` | `webcam_input/__init__.py` | verbatim |
+| `src/webcam_input/depth.py` | `webcam_input/depth.py` | verbatim |
+| `src/webcam_input/detector.py` | `webcam_input/detector.py` | path-rewrite |
+| `src/webcam_input/gestures.py` | `webcam_input/gestures.py` | verbatim |
+| `src/webcam_input/oak_camera.py` | `webcam_input/oak_camera.py` | verbatim |
+| `src/webcam_input/types.py` | `webcam_input/types.py` | verbatim |
+| `src/webcam_input/webcam_source.py` | `webcam_input/webcam_source.py` | verbatim |
+| `src/webcam_input/webcam_source_manager.py` | `webcam_input/webcam_source_manager.py` | verbatim |
+| `src/webcam_input/wrist_estimator.py` | `webcam_input/wrist_estimator.py` | verbatim |
+| `tests/test_depth.py` | `webcam_input/tests/test_depth.py` | verbatim |
+| `tests/test_gestures.py` | `webcam_input/tests/test_gestures.py` | verbatim |
+| `tests/test_process_hands.py` | `webcam_input/tests/test_process_hands.py` | verbatim |
+| `tests/test_source_manager.py` | `webcam_input/tests/test_source_manager.py` | verbatim |
+| `tests/test_wrist_estimator.py` | `webcam_input/tests/test_wrist_estimator.py` | verbatim |
+| `tests/test_public_dependency_boundary.py` | — | new |
+| `pyproject.toml` | — | new |
+
+**`detector.py` path rewrite.** The original resolved `SingleHandDetector` from
+`VR_DEX_RETARGETING_DIR`, falling back to a hardcoded sibling checkout at
+`../LeFranX/vr-dex-retargeting/example/vector_retargeting`. The sibling fallback is
+removed; resolution is now the env var, else an importable `single_hand_detector`
+module, else an `ImportError` naming both options. `detector_dir()` now returns
+`Path | None` instead of always returning a path — the only signature change.
+
+**Not copied.** `realsense_camera.py` and `pinch_geometry.py` are absent from this
+branch. `__pycache__/` was excluded.
+
+**Tests:** 19 collected in the source, 21 here (19 migrated + 2 new boundary tests),
+all passing under `.venv-webcam` with `VR_DEX_RETARGETING_DIR` set.
+
 ## Source repository state at migration
 
 Recorded so a later reader can reproduce exactly what was copied.

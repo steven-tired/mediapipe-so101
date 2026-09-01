@@ -1,5 +1,10 @@
 [tool.pytest.ini_options]
 addopts = "-ra"
+pythonpath = [
+  "packages/webcam_input/src",
+  "packages/so101_teleop/src",
+  "integrations/pressurevision/src",
+]
 testpaths = [
   "packages/webcam_input/tests",
   "packages/so101_teleop/tests",

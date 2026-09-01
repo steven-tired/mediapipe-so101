@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "webcam-input"
+version = "0.1.0"
+description = "MediaPipe webcam hand-tracking input for robot teleoperation"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "numpy",
+  "scipy",
+  "opencv-python",
+  "mediapipe==0.10.21",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
