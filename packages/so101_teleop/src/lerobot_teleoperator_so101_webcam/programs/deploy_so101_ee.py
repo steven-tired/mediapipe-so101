@@ -17,6 +17,7 @@ the power switch. Ctrl-C stops cleanly and leaves torque ON so the arm holds pos
 """
 
 import argparse
+import os
 import time
 
 import numpy as np
@@ -34,7 +35,8 @@ from ..ee_control import joint_center
 from ..ee_controller import MIDDLE_WRIST_DOWN_DEG
 
 ARM_ID = "so101_follower_1"
-WORKSPACE_CAM_PATH = "/dev/video2"   # Logitech C270 = observation.images.front (open by PATH)
+WORKSPACE_CAM_PATH = os.environ.get("SO101_WORKSPACE_CAM", "/dev/video2")
+# = observation.images.front, opened by PATH so a changing /dev/video index does not matter.
 WORKSPACE_CAM_FOURCC = "YUYV"        # MJPG drops bytes over USB -> corrupt frames; YUYV is clean
 FPS = 10                             # match the dataset's record rate
 DEFAULT_POLICY = "stevenzenith/dp_pickplace"
@@ -80,6 +82,31 @@ def _ready_pose(robot) -> dict:
     return pose
 
 
+def policy_camera_keys(policy) -> list[str]:
+    """The `observation.images.*` keys a policy expects, in config order."""
+    features = getattr(getattr(policy, "config", None), "image_features", None) or []
+    return [str(k) for k in features]
+
+
+def _check_policy_cameras(policy, cameras) -> None:
+    """Fail before touching the arm if the policy wants cameras we do not provide.
+
+    Without this the mismatch surfaces as a KeyError inside the first inference —
+    after the arm has already ramped to the ready pose and started moving.
+    """
+    wanted = policy_camera_keys(policy)
+    have = {f"observation.images.{name}" for name in cameras}
+    missing = [k for k in wanted if k not in have]
+    if missing:
+        raise SystemExit(
+            f"[deploy] policy expects {wanted} but this program provides "
+            f"{sorted(have)}.\n"
+            f"          Missing: {missing}\n"
+            f"          This deployment path is single-camera. Use a policy trained "
+            f"on one camera, or extend the camera set to match."
+        )
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--policy", default=DEFAULT_POLICY, help="HF Hub repo id or local dir")
@@ -106,6 +133,7 @@ def main():
 
     cameras = {"front": OpenCVCameraConfig(index_or_path=WORKSPACE_CAM_PATH, width=640, height=480,
                                            fps=FPS, fourcc=WORKSPACE_CAM_FOURCC, warmup_s=3)}
+    _check_policy_cameras(policy, cameras)
     robot = ResilientSOFollower(SO101FollowerConfig(port=args.port, id=ARM_ID, use_degrees=True,
                                                     cameras=cameras,
                                                     disable_torque_on_disconnect=False))
