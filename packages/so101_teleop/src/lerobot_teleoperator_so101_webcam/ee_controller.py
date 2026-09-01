@@ -168,6 +168,20 @@ class WebcamEEController:
             to_output=transition_to_robot_action,
         )
 
+    def close(self) -> None:
+        """Release control state. Safe to call more than once.
+
+        The controller owns the gripper controller's latched command and the
+        smoothing state; a recorder that stops mid-episode must not leave either
+        behind for the next session to inherit.
+        """
+        self.gripper.reset()
+        self.smoothed = None
+        self.ref = None
+        self.prev_enabled = False
+        if self.pipeline is not None:
+            self.pipeline.reset()
+
     def seed(self, joint_state: dict):
         """Seed the open-loop state from a settled joint read (keys '<motor>.pos')."""
         self.cmd_state = {f"{m}.pos": float(joint_state[f"{m}.pos"]) for m in self.motors}

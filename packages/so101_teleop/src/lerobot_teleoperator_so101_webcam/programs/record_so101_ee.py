@@ -174,14 +174,20 @@ class WebcamEEJointTeleop(Teleoperator):
         frame = self._source.latest_frame()
         if frame is not None:
             color = {"MOVING": (0, 200, 0), "MIDDLE": (0, 165, 255), "HOLD": (0, 0, 255)}[state]
-            middle_gesture = (
-                "ACTIVE" if self._ctl.middle_gesture_active
-                else "PENDING" if self._ctl.middle_gesture_seen
-                else "off"
-            )
+            banner = f"hand: {state}"
+            # The right-V middle gesture is an optional controller feature. This
+            # controller clutches on a left fist and does not implement it, so the
+            # indicator appears only when a controller actually exposes it rather
+            # than advertising a gesture that does nothing.
+            if hasattr(self._ctl, "middle_gesture_active"):
+                banner += "  middle(right-V): " + (
+                    "ACTIVE" if self._ctl.middle_gesture_active
+                    else "PENDING" if getattr(self._ctl, "middle_gesture_seen", False)
+                    else "off"
+                )
             cv2.putText(frame, self._status, (8, 26),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(frame, f"hand: {state}  middle(right-V): {middle_gesture}", (8, 52),
+            cv2.putText(frame, banner, (8, 52),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
             cv2.imshow(self._win, self._with_birdview(frame))
             self.last_key = cv2.waitKey(1) & 0xFF
