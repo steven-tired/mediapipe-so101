@@ -11,6 +11,7 @@ Episode control is LeRobot's standard keyboard UX (arrow keys via init_keyboard_
 Run:  ./scripts/run_record_ee.sh      (delete the dataset dir to re-record)
 """
 
+import argparse
 from contextlib import ExitStack
 from dataclasses import dataclass
 import os
@@ -44,6 +45,7 @@ from lerobot.utils.feature_utils import combine_feature_dicts
 
 from ..config_so101_webcam_ee import SO101WebcamEEConfig
 from ..ee_controller import WebcamEEController
+from ..grip.compose import add_gripper_mode_argument, build_gripper
 from ..grip.mediapipe import MediaPipeGripperController
 from ..paths import dataset_root, urdf_path
 from .teleop_viz_ee import disconnect_robot_safely
@@ -113,12 +115,14 @@ class WebcamEEJointTeleop(Teleoperator):
         controller: WebcamEEController,
         source: WebcamSource,
         robot=None,
+        use_oak: bool = False,
     ):
         super().__init__(config)
         self.config = config
         self._ctl = controller
         self._source = source
         self._robot = robot
+        self._use_oak = use_oak
         # The workspace "bird-view" camera the dataset records (observation.images.front). Shown next
         # to the hand-cam so the operator can keep the BLOCK inside what the policy actually sees.
         self._front_cam = robot.cameras.get("front") if robot is not None else None
@@ -144,7 +148,10 @@ class WebcamEEJointTeleop(Teleoperator):
 
     def connect(self, calibrate: bool = True) -> None:
         try:
-            self._source.start_oak()
+            if self._use_oak:
+                self._source.start_oak()
+            else:
+                self._source.start()
             # record_loop is headless (no display), so we show the hand-cam preview ourselves -- same
             # view the live teleop had: landmarks + control state. Window updates from get_action().
             self._win = "recording: hand-cam (control)  |  bird-view (what's recorded)"
@@ -338,7 +345,7 @@ def _close_and_dispose_recording_session(
         raise disposition_error
 
 
-def _run_recording(resources: ExitStack, gripper=None) -> None:
+def _run_recording(resources: ExitStack, gripper=None, *, use_oak: bool = False) -> None:
     import shutil
     resume = os.path.exists(DATASET_ROOT)   # append to an existing dataset instead of overwriting
 
@@ -361,7 +368,7 @@ def _run_recording(resources: ExitStack, gripper=None) -> None:
         robot,
         kin,
         cfg,
-        use_oak=True,
+        use_oak=use_oak,
         gripper=gripper or MediaPipeGripperController(),
     )
     resources.callback(controller.close)
@@ -375,7 +382,7 @@ def _run_recording(resources: ExitStack, gripper=None) -> None:
     print(f"EE centre (ready FK): {np.round(ee_centre, 3)}  down rotvec: {np.round(controller.r_down, 3)}")
 
     source = WebcamSource(WebcamWristEstimator(ScaleDepthStrategy(), workspace_size_m=cfg.workspace_size_m))
-    teleop = WebcamEEJointTeleop(cfg, controller, source, robot=robot)
+    teleop = WebcamEEJointTeleop(cfg, controller, source, robot=robot, use_oak=use_oak)
 
     ident_act, ident_obs = _identity("action"), _identity("obs")
     backup_dir = DATASET_ROOT + ".bak"
@@ -521,8 +528,15 @@ def _run_recording(resources: ExitStack, gripper=None) -> None:
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
+    ap.add_argument("--oak", action="store_true",
+                    help="use the OAK-D stereo depth camera instead of the monocular webcam")
+    add_gripper_mode_argument(ap)
+    args = ap.parse_args()
+    gripper = build_gripper(args.gripper_mode,
+                            zero_pos=args.grip_zero_pos, one_pos=args.grip_one_pos)
     with ExitStack() as resources:
-        _run_recording(resources)
+        _run_recording(resources, gripper=gripper, use_oak=args.oak)
 
 
 if __name__ == "__main__":

@@ -28,6 +28,12 @@ class WebcamSource:
         self._hands = None
         self._thread = None
         self._running = False
+        # Annotated BGR frame for an external preview. Set here, not only in
+        # start_oak(): latest_frame() is part of the public API and must not
+        # depend on which start path was taken.
+        self._latest_frame = None
+        self._mp_draw = None
+        self._mp_conns = None
         self._lock = threading.Lock()
         self._latest = (WristData(np.zeros(3), np.array([0.0, 0.0, 0.0, 1.0]), self._last_fist, False),
                         LandmarksData(np.zeros((21, 3)), False))
@@ -94,6 +100,8 @@ class WebcamSource:
             static_image_mode=False, max_num_hands=2,
             min_detection_confidence=0.8, min_tracking_confidence=0.8,
         )
+        self._mp_draw = mp.solutions.drawing_utils
+        self._mp_conns = mp.solutions.hands.HAND_CONNECTIONS
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -117,11 +125,17 @@ class WebcamSource:
                 continue
             self.image_shape = frame_bgr.shape[:2]
             rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            right, left = self.split_results(self._hands.process(rgb))
+            results = self._hands.process(rgb)
+            right, left = self.split_results(results)
             wrist, landmarks = self.process_hands(right=right, left=left)
+            annotated = frame_bgr.copy()   # draw landmarks for the preview window
+            if results.multi_hand_landmarks:
+                for hand_lms in results.multi_hand_landmarks:
+                    self._mp_draw.draw_landmarks(annotated, hand_lms, self._mp_conns)
             with self._lock:
                 self._latest = (wrist, landmarks)
                 self._has_frame = wrist.valid
+                self._latest_frame = annotated
 
     def start_oak(self):
         """Capture from an OAK-D (clean stereo depth) instead of a cv2 webcam.
@@ -146,7 +160,6 @@ class WebcamSource:
         )
         self._mp_draw = mp.solutions.drawing_utils
         self._mp_conns = mp.solutions.hands.HAND_CONNECTIONS
-        self._latest_frame = None   # annotated BGR frame for an external preview
         self.oak_failed = False     # set True if the OAK device crashes (X_LINK) mid-stream
         self._running = True
         self._thread = threading.Thread(target=self._loop_oak, daemon=True)
