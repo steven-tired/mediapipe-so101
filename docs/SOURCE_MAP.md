@@ -61,6 +61,60 @@ branch. `__pycache__/` was excluded.
 **Tests:** 19 collected in the source, 21 here (19 migrated + 2 new boundary tests),
 all passing under `.venv-webcam` with `VR_DEX_RETARGETING_DIR` set.
 
+## packages/so101_teleop
+
+Source: `webcam-input/lerobot_teleoperator_so101_webcam/` at 4e1f2fb. The nine
+package modules come from the **inner** `lerobot_teleoperator_so101_webcam/`
+directory; the ten programs come from the outer one.
+
+| Destination | Source | Disposition |
+| --- | --- | --- |
+| `src/lerobot_teleoperator_so101_webcam/{__init__,config_so101_webcam,config_so101_webcam_ee,control,ee_control,ee_controller,servo_pid,so101_webcam,so101_webcam_ee}.py` | inner package, same names | verbatim |
+| `src/lerobot_teleoperator_so101_webcam/programs/*.py` | outer dir: `deploy_so101_ee`, `diagnose_deploy`, `dry_run`, `dry_run_viz`, `record_so101_ee`, `servo_current`, `teleop_viz`, `teleop_viz_ee`, `teleop_viz_oak`, `tune_servo_pid` | path-rewrite |
+| `src/lerobot_teleoperator_so101_webcam/paths.py` | — | new |
+| `tests/{test_discovery,test_ee_control,test_ee_teleoperator,test_filters,test_retarget,test_teleoperator}.py` | outer `tests/` | verbatim |
+| `tests/test_record_so101_ee_terminal_messages.py` | outer `tests/`, **untracked in the source** | path-rewrite |
+| `tests/test_public_boundary.py` | — | new |
+
+**Programs became a subpackage.** They were loose scripts run by path; here they
+are `lerobot_teleoperator_so101_webcam.programs.*`, invoked with `python -m`. The
+wrappers therefore do not depend on a checkout location.
+
+**Path rewrites.** `paths.py` resolves the repository root from the installed
+package and reads `SO101_URDF`/`SO_ARM100_DIR`, `SO101_LOCAL_DIR`,
+`SO101_DATASET_ROOT`, and `SO101_EVIDENCE_DIR`. Four rewritten defaults were not
+merely cosmetic — they pointed at paths that no longer exist in the source
+workspace:
+
+| File | Old default | Status in source |
+| --- | --- | --- |
+| `record_so101_ee.py` `DATASET_ROOT` | `datasets/hand_tracking_pick_place` | removed; datasets were reorganised to `hand_tracking_pv_carton_*` |
+| `diagnose_deploy.py` `--csv` | `eval/csv/diag_log.csv` | `eval/` removed |
+| `diagnose_deploy.py` `--frame-dir` | `eval/frames/diag_frames` | `eval/` removed |
+| `record_so101_ee.py`, `teleop_viz_ee.py` `URDF_PATH` | absolute SO-ARM100 path | SO-ARM100 is an optional external dependency here |
+
+**IR exclusion.** 21 IR programs and 26 IR tests were left behind for
+`ir-camera-force`. They are named `analyze_ir_*`, `record_ir_*`, `compare_ir_*`,
+`extract_ir_*`, `organize_ir_*`, `characterize_ir_*`, `report_ir_*`,
+`verify_ir_*`, `view_ir_*`, and `prepare_gpt_pro_rep08_review.py` — **none starts
+with `ir_`**, so a prefix rule would have leaked all of them.
+
+**Tests:** 31 in the source, 34 here (31 migrated + 3 new boundary tests), all
+passing under `.venv-lerobot`.
+
+### Deferred: recorder reconstruction
+
+`record_so101_ee.py` here is the base-checkout version. The
+`ir-hand-pressure-so101-teleop` worktree carries a restructured recorder (663 lines
+vs 481) with `build_dataset_features`, `_close_and_dispose_recording_session`, and
+an `ExitStack`-based `_run_recording`. That structure is wanted, but its IR sidecar
+plumbing threads through the teleoperator constructor, so it is reconstructed
+against the gripper contract rather than copied. See the grip-contract commit.
+
+`ee_controller.py` is the base version (211 lines, zero IR/PV references). The
+worktree version is 1052 lines with 257 IR/PV references and is deliberately not
+used.
+
 ## Source repository state at migration
 
 Recorded so a later reader can reproduce exactly what was copied.

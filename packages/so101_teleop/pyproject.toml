@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot-teleoperator-so101-webcam"
+version = "0.1.0"
+description = "MediaPipe hand-tracking teleoperator for SO-101"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "numpy",
+  "scipy",
+  "matplotlib",
+  "lerobot==0.5.2",
+  "webcam-input==0.1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
