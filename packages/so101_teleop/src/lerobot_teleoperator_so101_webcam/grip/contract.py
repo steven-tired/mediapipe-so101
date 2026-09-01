@@ -8,7 +8,7 @@ the optional PressureVision path from ever being able to open the gripper.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 __all__ = ["GripInput", "GripperController", "STALE_AFTER_S", "make_grip_input"]
 
@@ -38,6 +38,7 @@ class GripInput:
     observed_at_s: float
 
 
+@runtime_checkable
 class GripperController(Protocol):
     def reset(self) -> None: ...
 

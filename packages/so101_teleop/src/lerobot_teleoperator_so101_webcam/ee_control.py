@@ -32,6 +32,18 @@ def joint_center(norm_mode_value: str) -> float:
     return 50.0 if str(norm_mode_value) == "range_0_100" else 0.0
 
 
+# --- Grasp latch thresholds (0 = clamped shut, 100 = fully open) ---
+# Below ENTER the operator has committed to a grasp; above EXIT the hand is
+# deliberately open. The gap is wide on purpose and the thresholds are
+# asymmetric for a specific reason: MediaPipe degrades as the hand closes and
+# the fingers occlude each other, and recovers as it opens. So the release
+# signal is reliable exactly when the grip signal is not.
+GRIP_LATCH_ENTER = 30.0
+GRIP_LATCH_EXIT = 65.0
+# A single spurious "open" frame must not release a grasp mid-lift.
+GRIP_LATCH_EXIT_FRAMES = 5
+
+
 def gripper_pos_from_pinch(pinch: float, cfg) -> float:
     """ABSOLUTE gripper position in [0, 100] from thumb-index pinch distance.
 

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mediapipe-so101-pressurevision"
+version = "0.1.0"
+description = "Optional PressureVision gripper integration for MediaPipe SO-101"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "numpy",
+  "opencv-python",
+  "webcam-input==0.1.0",
+  "lerobot-teleoperator-so101-webcam==0.1.0",
+]
+
+# PressureVision itself is a separately pinned MIT dependency and is NOT vendored
+# here. The sender runs as its own process and speaks the UDP packet contract in
+# pressurevision_integration.pv_pressure, so its dependencies never enter the
+# LeRobot environment.
+
+[tool.setuptools.packages.find]
+where = ["src"]
