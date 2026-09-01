@@ -18,18 +18,18 @@ not modify the LeRobot checkout or the sanitized dataset.
 
 ```bash
 # Twenty-update CUDA and data-decoding smoke test.
-bash /home/zhuokai/hand-teleop/training/phase_c_act/run_act.sh smoke
+bash training/phase_c_act/run_act.sh smoke
 
 # 50,000-update training run after the smoke test passes.
-bash /home/zhuokai/hand-teleop/training/phase_c_act/run_act.sh full
+bash training/phase_c_act/run_act.sh full
 ```
 
 If the measured GPU memory from the smoke test requires a smaller batch, set
 the chosen value explicitly for both runs:
 
 ```bash
-ACT_BATCH_SIZE=4 bash /home/zhuokai/hand-teleop/training/phase_c_act/run_act.sh smoke
-ACT_BATCH_SIZE=4 bash /home/zhuokai/hand-teleop/training/phase_c_act/run_act.sh full
+ACT_BATCH_SIZE=4 bash training/phase_c_act/run_act.sh smoke
+ACT_BATCH_SIZE=4 bash training/phase_c_act/run_act.sh full
 ```
 
 Each invocation creates a timestamped model directory under `outputs/` and a

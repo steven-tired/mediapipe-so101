@@ -17,14 +17,16 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies import make_pre_post_processors
 from lerobot.policies.act.modeling_act import ACTPolicy
 from lerobot.utils.constants import ACTION, OBS_IMAGES
+from lerobot_teleoperator_so101_webcam.paths import dataset_root, local_dir
 
 
-CHECKPOINT = Path(
-    "/home/zhuokai/hand-teleop/training/phase_c_act_augmented/outputs/"
-    "act_phase_c_aug_holdout_20260824_150345/checkpoints/050000/pretrained_model"
+CHECKPOINT = (
+    local_dir() / "training_runs" / "phase_c_act_augmented" / "outputs"
+    / "act_phase_c_aug_holdout_20260824_150345" / "checkpoints" / "050000"
+    / "pretrained_model"
 )
-PHASE_B_ROOT = Path("/home/zhuokai/hand-teleop/datasets/hand_tracking_pv_carton_phase_b")
-MIDDLE_ROOT = Path("/home/zhuokai/hand-teleop/datasets/hand_tracking_pv_carton_middle_standard")
+PHASE_B_ROOT = dataset_root() / "hand_tracking_pv_carton_phase_b"
+MIDDLE_ROOT = dataset_root() / "hand_tracking_pv_carton_middle_standard"
 PHASE_B_EPISODES = [1, 9, 14, 20, 26]
 MIDDLE_EPISODES = [0, 1, 2, 3, 4, 5, 6, 7, 10, 11]
 

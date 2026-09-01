@@ -410,7 +410,7 @@ both. Short history did not resolve the onset ambiguity.
 Exact command:
 
 ```bash
-HF_HOME=/home/zhuokai/hand-teleop/training/.cache env -u PYTHONPATH .venv-lerobot/bin/python training/phase_c_grasp_ready/grasp_ready_probe.py evaluate --cache-path training/phase_c_grasp_ready/cache/resnet18_phase_b.npz --output-dir evidence/phase_c_gripper_signal_probe/offline_20260825_grasp_ready_v1 --seed 0 --epochs 120
+HF_HOME=local/training_runs/.cache env -u PYTHONPATH .venv-lerobot/bin/python training/phase_c_grasp_ready/grasp_ready_probe.py evaluate --cache-path training/phase_c_grasp_ready/cache/resnet18_phase_b.npz --output-dir evidence/phase_c_gripper_signal_probe/offline_20260825_grasp_ready_v1 --seed 0 --epochs 120
 ```
 
 Artifacts:

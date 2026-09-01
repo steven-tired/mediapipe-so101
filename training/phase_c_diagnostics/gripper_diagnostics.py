@@ -10,6 +10,7 @@ import json
 import numpy as np
 from pathlib import Path
 import torch
+from lerobot_teleoperator_so101_webcam.paths import dataset_root
 
 
 GRIPPER_INDEX = 5
@@ -743,7 +744,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default=Path("/home/zhuokai/hand-teleop/datasets/hand_tracking_pv_carton_phase_b"),
+        default=Path(str(dataset_root() / "hand_tracking_pv_carton_phase_b")),
     )
     parser.add_argument("--repo-id", default="stevenzenith/hand_tracking_pv_carton_phase_b")
     parser.add_argument("--episodes", default="0,5,10,16,23,26")
@@ -768,7 +769,7 @@ def parse_args() -> argparse.Namespace:
         "--episode-map",
         type=Path,
         default=Path(
-            "/home/zhuokai/hand-teleop/datasets/hand_tracking_pv_carton_phase_b/source_episode_map.csv"
+            str(dataset_root() / "hand_tracking_pv_carton_phase_b" / "source_episode_map.csv")
         ),
     )
     parser.add_argument("--output-dir", type=Path, required=True)

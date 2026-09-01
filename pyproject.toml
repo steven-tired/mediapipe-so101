@@ -1,5 +1,8 @@
 [tool.pytest.ini_options]
 addopts = "-ra"
+# `local/` holds ignored artifacts, including whole legacy checkouts with their own
+# test suites. Git ignores it; pytest does not, so say so explicitly.
+norecursedirs = ["local", ".git", "*.egg-info", "__pycache__"]
 pythonpath = [
   "packages/webcam_input/src",
   "packages/so101_teleop/src",

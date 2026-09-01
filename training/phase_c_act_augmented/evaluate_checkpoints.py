@@ -20,10 +20,11 @@ from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
 from lerobot.policies import make_pre_post_processors
 from lerobot.policies.act.modeling_act import ACTPolicy
 from lerobot.utils.constants import ACTION
+from lerobot_teleoperator_so101_webcam.paths import dataset_root
 
 
 DEFAULT_DATASET_ROOT = Path(
-    "/home/zhuokai/hand-teleop/datasets/hand_tracking_pv_carton_phase_b"
+    str(dataset_root() / "hand_tracking_pv_carton_phase_b")
 )
 DEFAULT_REPO_ID = "stevenzenith/hand_tracking_pv_carton_phase_b"
 DEFAULT_EPISODES = [0, 5, 10, 16, 23, 26]

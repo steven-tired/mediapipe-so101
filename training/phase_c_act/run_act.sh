@@ -25,7 +25,7 @@ case "$profile" in
     ;;
 esac
 
-workspace=/home/zhuokai/hand-teleop
+workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 run_root="$workspace/training/phase_c_act"
 dataset_root="$workspace/datasets/hand_tracking_pv_carton_phase_b"
 train_cli="$workspace/.venv-lerobot/bin/lerobot-train"

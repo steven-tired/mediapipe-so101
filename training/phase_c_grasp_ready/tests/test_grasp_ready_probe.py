@@ -1,5 +1,6 @@
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 
@@ -205,7 +206,7 @@ def test_evaluate_cli_reaches_dataset_contract_check(tmp_path):
             "--output-dir",
             str(output_dir),
         ],
-        cwd="/home/zhuokai/hand-teleop",
+        cwd=str(Path(__file__).resolve().parents[3]),
         text=True,
         capture_output=True,
     )
