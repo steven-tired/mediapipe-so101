@@ -1,0 +1,23 @@
+{
+  "id": "zhuokaiyuan/phase-c-smolvla-extend-carton",
+  "title": "Phase C SmolVLA Extend Carton",
+  "code_file": "train_smolvla_extend_kaggle.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "machine_shape": "NvidiaTeslaT4",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [
+    "zhuokaiyuan/phase-c-smolvla-carton"
+  ],
+  "model_sources": [],
+  "keywords": [
+    "robotics",
+    "lerobot",
+    "smolvla"
+  ]
+}
