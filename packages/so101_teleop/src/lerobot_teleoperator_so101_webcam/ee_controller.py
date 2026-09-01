@@ -53,9 +53,15 @@ MIDDLE_WRIST_DOWN_DEG = 90.0     # clutch/ready pose pitches wrist down so the g
 # GRIP_CLOSE_ALPHA toward 1.0 for an even snappier/firmer clamp; lower GRIP_OPEN_ALPHA for more
 # loosening resistance. GRIP_OVERDRIVE shifts the whole command toward closed so a normal (not
 # fully-touching) pinch still reaches a firm grip -- increase it if the grip is still too soft.
-GRIP_CLOSE_ALPHA = 0.7   # EMA weight while closing (value decreasing toward 0)
-GRIP_OPEN_ALPHA = 0.15   # EMA weight while opening (value increasing toward 100)
-GRIP_OVERDRIVE = 18.0    # shift grip command toward closed (units of 0..100)
+# The tuned values and the smoothing itself now live behind the gripper contract,
+# so the optional PressureVision mode can be swapped in without touching this file.
+from .grip.contract import GripInput
+from .grip.mediapipe import (  # noqa: F401  (re-exported for existing callers)
+    GRIP_CLOSE_ALPHA,
+    GRIP_OPEN_ALPHA,
+    GRIP_OVERDRIVE,
+    MediaPipeGripperController,
+)
 
 
 @dataclass
@@ -110,7 +116,7 @@ class WebcamEEController:
         joints, state = ctl.step(wrist, landmarks)   # state in {MIDDLE, MOVING, HOLD}
     """
 
-    def __init__(self, robot, kin, cfg, use_oak: bool):
+    def __init__(self, robot, kin, cfg, use_oak: bool, gripper=None):
         self.kin = kin
         self.cfg = cfg
         self.motors = list(robot.bus.motors.keys())
@@ -139,7 +145,7 @@ class WebcamEEController:
         self.ref = None
         self.prev_enabled = False
         self.smoothed = None
-        self.grip_smoothed = None
+        self.gripper = gripper or MediaPipeGripperController()
         self.cmd_state = dict(self.middle_pose)
 
     def build(self, ee_centre):
@@ -186,7 +192,7 @@ class WebcamEEController:
             self.pipeline.reset()
             self.ref = None
             self.smoothed = None
-            self.grip_smoothed = None
+            self.gripper.reset()
             self.cmd_state = dict(self.middle_pose)
             return dict(self.middle_pose), "MIDDLE"
 
@@ -197,14 +203,19 @@ class WebcamEEController:
             for m in self.body_motors:
                 self.smoothed[m] = SMOOTHING_ALPHA * joint_act[f"{m}.pos"] + (1 - SMOOTHING_ALPHA) * self.smoothed[m]
                 joint_act[f"{m}.pos"] = self.smoothed[m]
-            # Overdrive toward closed (firmer grip), then ASYMMETRIC EMA: fast close, slow open.
-            raw_grip = max(0.0, gripper_pos_from_pinch(pinch, self.cfg) - GRIP_OVERDRIVE)
-            if self.grip_smoothed is None:
-                self.grip_smoothed = raw_grip
-            else:
-                a = GRIP_CLOSE_ALPHA if raw_grip < self.grip_smoothed else GRIP_OPEN_ALPHA
-                self.grip_smoothed = a * raw_grip + (1 - a) * self.grip_smoothed
-            joint_act["gripper.pos"] = self.grip_smoothed
+            # Overdrive and the asymmetric close/open smoothing live in the gripper
+            # controller now. severity is the pinch mapping normalised: 1 = grip hardest.
+            severity = 1.0 - gripper_pos_from_pinch(pinch, self.cfg) / 100.0
+            grip_in = GripInput(
+                grasp_active=True,
+                explicit_release=False,
+                severity=severity,
+                valid=True,
+                observed_at_s=wrist.observed_at_s if hasattr(wrist, "observed_at_s") else 0.0,
+            )
+            joint_act["gripper.pos"] = self.gripper.step(
+                grip_in, actual_pos=self.cmd_state.get("gripper.pos", 50.0)
+            )
             self.cmd_state = dict(joint_act)
             return joint_act, "MOVING"
 
