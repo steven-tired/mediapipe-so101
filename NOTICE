@@ -1,0 +1,40 @@
+mediapipe-so101
+Copyright 2026 the mediapipe-so101 authors
+
+This product includes software developed as part of, or derived from, the
+following projects. Their notices are retained as required.
+
+--------------------------------------------------------------------------
+Apache License 2.0
+--------------------------------------------------------------------------
+
+LeRobot — https://github.com/huggingface/lerobot
+  Copyright the LeRobot authors. Licensed under the Apache License, Version 2.0.
+  Used as a pinned runtime dependency. Robot, teleoperator, and dataset APIs in
+  packages/so101_teleop are written against LeRobot's interfaces, and parts of
+  the SO-101 teleoperator/recorder follow LeRobot's structure.
+
+LeFranX
+  Copyright the LeFranX authors. Licensed under the Apache License, Version 2.0.
+  The VR-to-robot axis transform, the weighted inverse-kinematics approach, and
+  the end-effector control bridge in packages/so101_teleop derive from LeFranX.
+
+--------------------------------------------------------------------------
+MIT License
+--------------------------------------------------------------------------
+
+PressureVision — https://github.com/facebookresearch/PressureVision
+  Copyright Meta Platforms, Inc. and affiliates. Licensed under the MIT License.
+  An optional dependency of integrations/pressurevision. Not vendored here.
+
+vr-dex-retargeting
+  Licensed under the MIT License. A pinned optional dependency used for hand
+  retargeting; resolved by configuration, not by a sibling-checkout assumption.
+
+--------------------------------------------------------------------------
+Third-party runtime dependencies
+--------------------------------------------------------------------------
+
+MediaPipe (Apache-2.0), OpenCV (Apache-2.0), NumPy (BSD-3-Clause),
+SciPy (BSD-3-Clause), and matplotlib (PSF-based) are declared as dependencies
+and are not redistributed in this repository.

@@ -1,0 +1,7 @@
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = [
+  "packages/webcam_input/tests",
+  "packages/so101_teleop/tests",
+  "integrations/pressurevision/tests",
+]
