@@ -9,10 +9,16 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # site-packages; without this, `python -m` would silently run that one instead.
 export PYTHONPATH="$REPO/packages/so101_teleop/src:$REPO/packages/webcam_input/src:$REPO/integrations/pressurevision/src${PYTHONPATH:+:$PYTHONPATH}"
 
-# Teleop and recording are CPU-only (MediaPipe + placo IK). Keeping torch off the
-# GPU avoids waking a flaky dGPU on import. Training and deployment override this.
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES-}"
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
+
+# Teleop and recording are CPU-only (MediaPipe + placo IK), and hiding the GPU
+# stops torch waking a flaky dGPU on import. Deployment and diagnostics NEED the
+# GPU, so a wrapper opts in by calling this BEFORE run_module. Note the empty
+# assignment hides every GPU -- exporting it unconditionally is what broke
+# deployment with "No CUDA GPUs are available".
+hide_gpu() {
+  export CUDA_VISIBLE_DEVICES=""
+}
 
 PYTHON="${SO101_PYTHON:-python3}"
 
