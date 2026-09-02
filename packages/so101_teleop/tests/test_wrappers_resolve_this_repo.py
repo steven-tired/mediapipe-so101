@@ -22,7 +22,7 @@ def test_the_expected_wrappers_exist():
     assert {p.name for p in WRAPPERS} == {
         "run_arm_ee.sh", "run_record_ee.sh", "run_record_pv_ee.sh",
         "run_deploy_ee.sh", "run_deploy_grip_ee.sh", "run_deploy_pv_corrections.sh",
-        "run_diagnose.sh", "run_teleop_viz.sh", "run_pv_pad.sh",
+        "run_diagnose.sh", "run_teleop_viz.sh", "run_pv_pad.sh", "run_so101_diag.sh",
         "run_carton_fixed_grip_trials.sh", "probe_oak.sh", "view_camera.sh",
     }
 
@@ -65,7 +65,7 @@ def test_no_wrapper_hardcodes_a_developer_path():
 # diagnostics run a policy and must NOT inherit it -- exporting it for every
 # wrapper made deploy fail with "No CUDA GPUs are available".
 CPU_ONLY = {"run_arm_ee.sh", "run_record_ee.sh", "run_teleop_viz.sh",
-            "view_camera.sh", "probe_oak.sh"}
+            "view_camera.sh", "probe_oak.sh", "run_so101_diag.sh"}
 NEEDS_GPU = {"run_deploy_ee.sh", "run_deploy_grip_ee.sh", "run_diagnose.sh"}
 # These cannot be probed by running them: they need hardware or a fitted
 # levels.json before they reach any python, or they start several processes
