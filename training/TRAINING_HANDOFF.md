@@ -1503,6 +1503,29 @@ Reported earlier as a deterministic `32.72`. That held for three trials with
 the carton in one place; moving it produced `26.56` and `29.97`. The closure
 tracks the scene, which is what a head needs it to do.
 
+### The carton deforms at a readback near 21.3, and that moves every boundary
+
+The only damage measurement so far, and it is an operator observation, not an
+instrument. Lowering the tighten floor from `22` to `18` drove the jaw to a
+readback of `21.31` and left a visible, recoverable dent in the carton.
+
+The dent is not a side effect to note and move past -- it changed the
+measurement. trial09's three boundaries all fell with it: lift `21.31` against
+`24.20`-`25.31` at floor 22, onset `24.13` against `25.38`-`25.70`, drop `24.59`
+against `26.16`-`28.85`. A flattened carton is thinner, so the jaw has to be
+tighter for the same real grip. Read as hysteresis at first, which was wrong:
+the carton changed, not the path to it.
+
+Two consequences. Boundaries are only comparable within a floor setting, so the
+eight trials at floor 22 and the one at 18 are separate groups. And the
+objective now has a measured ceiling: a grasp that reaches about `21.3` of
+readback is already deforming the carton, whatever it does for the lift.
+
+Floor `22` is too shallow in the other direction -- the jaw settles at `24.3` to
+`25.3`, within about `0.9` of the slip onset, so the carton lifts with no margin
+and slips at once. `20` is the setting being tried next, which should land near
+`22.5` to `23.3` on the measured `readback ≈ floor + 2.4 to 3.3`.
+
 ### Next gates after 2026-09-02
 
 Gate 1 is closed and gate 2 is implemented but unrun. Renumbering the rest
