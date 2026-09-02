@@ -1,6 +1,6 @@
 # Phase C training and evaluation handoff
 
-Updated: 2026-08-27 CDT
+Updated: 2026-09-02 CDT
 
 This is the canonical handoff for Phase C policy training and deployment
 evaluation. Checkpoint storage details are kept in
@@ -34,6 +34,13 @@ evaluation. Checkpoint storage details are kept in
 - Grip-residual collection started on 2026-08-27. The numeric head and
   shadow-inference path exist, but no head checkpoint has been trained yet.
   Continue reviewed collection before fitting it.
+- Gate 1 closed on 2026-09-02. The gripper is strongly asymmetric: the smallest
+  resolvable loosen step is `0.5` and the smallest resolvable tighten step is
+  `2.0`, so tightening is the binding constraint. The `0.2` step used on
+  2026-08-31 is one tenth of that. Those four slots failed structurally, not by
+  chance. Collection for a loosen/tighten head is cleared to start at these
+  step sizes; see the 2026-09-02 section for the numbers and for the one result
+  that changes what the tighten branch can resolve.
 - Superseded on 2026-09-01. The `0.2` intervention step is about one quarter of
   the gripper's command-to-readback offset and produced no resolvable jaw
   motion, so the 2026-08-31 A/B slots measure a null intervention. ACT was also
@@ -1260,3 +1267,112 @@ loose side. That is accepted for now under the margin definition above.
 
 No checkpoint is approved for actuation. The grip head still must not command the
 motor.
+
+
+## Gripper deadband calibration on 2026-09-02
+
+Gate 1 of the 2026-09-01 list. Run with `run_gripper_deadband.sh --arm-enabled
+--close-to 26`, which takes the carton itself and then walks a staircase of each
+step size in both directions, body joints frozen at one reading. Evidence:
+`local/evidence/smoke/gripper_deadband/20260902_151250`.
+
+### The gripper is strongly asymmetric
+
+Jaw travel actually delivered per commanded degree, at the noise floor this
+hardware really has (`0.0000`; the encoder quantum is `0.0656`):
+
+| Commanded step | Loosen travel | Delivered | Tighten travel | Delivered |
+| ---: | ---: | ---: | ---: | ---: |
+| 0.5 | 0.475 | 95% | 0.093 | 19% |
+| 1.0 | 0.896 | 90% | 0.317 | 32% |
+| 2.0 | 1.792 | 90% | 0.787 | 39% |
+| 3.0 | 2.689 | 90% | 1.148 | 38% |
+| 5.0 | 4.393 | 88% | 1.836 | 37% |
+
+**Smallest resolvable loosen step `0.5`; smallest resolvable tighten step
+`2.0`.** "Resolvable" here means every tread of that ramp moved the jaw, in the
+commanded direction, past the noise floor. Scoring "some tread moved" would
+have certified `0.2`: a ramp stepped below the breakout offset still advances,
+in stick-slip bursts, because it is the accumulated command error that breaks
+static friction rather than the step.
+
+Loosening is nearly free -- the carton pushes the jaw open, so there is no
+static friction to break, and `0.5` already tracks at 95%. Tightening saturates
+at about 38% delivery at *every* step size from 2.0 up. That is compliance, not
+deadband: roughly 62% of each commanded tightening degree goes into deforming
+the carton and winding up the drivetrain rather than into jaw travel. Below
+1.0 delivery falls further, to 19%, and that part is deadband.
+
+Tighten step `1.0` moved on 5 of its 6 treads at 32% delivery, one tread short
+of the strict criterion. It is the usable marginal option if a finer boundary
+resolution is worth a ramp that occasionally stalls a tread.
+
+### The tighten step is coarser than the band it has to resolve
+
+ACT's lift-versus-fail threshold band sits at commanded `25.4` to `26.0`, about
+`0.6` wide. The smallest resolvable tighten step is `2.0`, more than three times
+that width. A tighten ramp therefore cannot land inside the band; it steps past
+it in one move.
+
+This does not block the stall-and-tighten baseline, which only has to break the
+stall. It does bound the paired collection: a `lift_boundary` recorded on the
+tighten branch is quantized to about `2.0`, while a `slip_boundary` on the
+loosen branch is quantized to about `0.5`. Read the two with that asymmetry in
+mind -- the sign and size of the gap between them is the quantity the protocol
+exists to measure, and on the tighten side it is the coarser of the two.
+
+### Both effort channels do respond to depth, weakly
+
+Over a deliberate depth staircase, rank correlation against grip depth:
+
+| Channel | Tighten | Loosen | Distinct values |
+| --- | ---: | ---: | ---: |
+| `Present_Load` | 0.446 | 0.460 | 21-22 |
+| `Present_Current` | 0.432 | -0.056 | 9-22 |
+
+This is weaker pessimism than the 2026-09-01 reading. `Present_Load` took 21 to
+22 distinct values across the staircase, not the near-constant it is within a
+single held trial, so "possibly no sensor" is too strong. `Present_Current`
+responds only while tightening, which is physically right: tightening does work
+against the carton and loosening does not.
+
+It is not yet a usable signal. Treads within one ramp are serially correlated,
+so the effective sample count is far below 24, and rho near 0.45 on that
+carries no conclusion. It says gate 4's single-feature AUC is worth running,
+not that it will pass.
+
+### A defect in the first run of this tool
+
+The first run reported a smallest resolvable loosen step of `2.0`. That was
+wrong; it is `0.5`. The noise floor was measured across the closing ramp's
+settle transient: the jaw moved `0.852` in the first half second and then held
+at exactly `31.2131` for the remaining `4.9 s` at a peak-to-peak of `0.0000`,
+which is why the reported floor equalled the command-to-readback offset to the
+digit. A floor of `0.852` then required more than `0.852` of travel per tread,
+and scored a loosen ramp tracking its command at 95% as having moved on none of
+its treads.
+
+The tool now settles and discards before it measures, and warns when the floor
+it measured is high enough to be a transient. The table above is recomputed
+from the recorded per-tread deltas and is stable for any floor between `0.0`
+and one encoder quantum. `summary.json` in that evidence directory still holds
+the bad `noise_floor` and `smallest_resolvable_step` fields from the original
+run; the per-tread records beside them are good.
+
+### Next gates after 2026-09-02
+
+Gate 1 is closed and gate 2 is implemented but unrun. Renumbering the rest
+against the calibrated steps:
+
+1. Run the stall-and-tighten baseline at `--stall-tighten-step 2` over 8 to 10
+   trials and measure its no-lift rate against the current 50%. No learned head
+   is worth deploying until it beats this.
+2. Collect paired lift and slip boundaries with the two-branch protocol,
+   tightening at `2.0` and loosening at `0.5`.
+3. Before training any head, report single-feature AUC for the lift and slip
+   events over the six proprioceptive and fourteen visual features.
+4. Re-score the five reviewed 2026-08-31 videos blind against a defined
+   displacement criterion, and downgrade trial03 to `inconclusive`.
+
+No checkpoint is approved for actuation. The grip head still must not command
+the motor.
