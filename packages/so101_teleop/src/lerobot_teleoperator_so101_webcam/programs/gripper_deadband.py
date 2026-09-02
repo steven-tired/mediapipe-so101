@@ -244,6 +244,22 @@ def run(args) -> tuple[dict, list]:
             start_pos = float(robot.get_observation()[f"{GRIPPER}.pos"])
             print(f"gripper readback after closing: {start_pos:.3f}")
 
+        # Settle BEFORE measuring, and throw the settle away. The first run
+        # measured across it: the jaw was still arriving from the closing ramp,
+        # moved 0.852 in the first half second, then held at exactly 31.2131
+        # for the remaining 4.9 s at a peak-to-peak of 0.0000. The floor came
+        # out as that one transient, which is also why it equalled the
+        # command-to-readback offset exactly. A floor of 0.852 then demanded
+        # more than 0.852 of travel per tread, and scored a loosen ramp that
+        # tracked its command at 95% as having moved on none of its treads.
+        print(f"settling {args.settle_s:g}s at {start_pos:.3f} before measuring")
+        settle = dwell(robot, body=body, gripper_pos=start_pos, seconds=args.settle_s, hz=args.hz,
+                       arm_enabled=args.arm_enabled, started_at=started_at,
+                       max_current=args.max_current, max_temperature=args.max_temperature,
+                       samples=samples)
+        settle_spread = readback_spread(settle)
+        print(f"  settle transient (discarded): {settle_spread:.3f}")
+
         print(f"holding {args.hold_s:g}s to measure the noise floor")
         hold = dwell(robot, body=body, gripper_pos=start_pos, seconds=args.hold_s, hz=args.hz,
                      arm_enabled=args.arm_enabled, started_at=started_at,
@@ -257,6 +273,15 @@ def run(args) -> tuple[dict, list]:
         print(f"  distinct readbacks while held: {len({s.gripper_pos for s in hold})}")
         print(f"  command-to-readback offset: {offset:+.3f}")
         print(f"  load mean {hold_effort['mean_load']:.2f}  current mean {hold_effort['mean_current']:.2f}")
+        if noise_floor > args.floor_warn:
+            # Not fatal: a genuinely restless jaw has a genuinely high floor,
+            # and every step it then disqualifies really is unresolvable
+            # against it. But it is far more often a jaw that has not finished
+            # arriving, and then every result below is conservative by however
+            # much of this is transient.
+            print(f"  ! the floor is above {args.floor_warn:g} while the command is held. Either the "
+                  "jaw is still settling -- raise --settle-s and re-run -- or it is genuinely "
+                  "restless, and every step size below is judged against that.")
 
         directions = ["tighten", "loosen"] if args.direction == "both" else [args.direction]
         sweeps: dict[str, dict] = {}
@@ -322,6 +347,8 @@ def run(args) -> tuple[dict, list]:
         "ramp_travel": args.ramp_travel,
         "dwell_s": args.dwell_s,
         "hold_s": args.hold_s,
+        "settle_s": args.settle_s,
+        "settle_spread": settle_spread,
         "hz": args.hz,
         "max_travel": args.max_travel,
         "max_current": args.max_current,
@@ -358,7 +385,12 @@ def main():
     ap.add_argument("--ramp-travel", type=float, default=6.0,
                     help="commanded degrees each ramp walks, whatever its step size")
     ap.add_argument("--dwell-s", type=float, default=2.0, help="hold at each tread")
-    ap.add_argument("--hold-s", type=float, default=5.0, help="initial hold for the noise floor")
+    ap.add_argument("--hold-s", type=float, default=5.0, help="hold measured for the noise floor")
+    ap.add_argument("--settle-s", type=float, default=3.0,
+                    help="hold discarded before the noise floor is measured, so the closing "
+                         "ramp's transient is not mistaken for jaw noise")
+    ap.add_argument("--floor-warn", type=float, default=0.3,
+                    help="warn when the measured noise floor exceeds this")
     ap.add_argument("--hz", type=float, default=10.0, help="command and sample rate")
     ap.add_argument("--max-travel", type=float, default=12.0,
                     help="degrees of gripper travel allowed from the settled start")
@@ -384,6 +416,8 @@ def main():
         ap.error("--close-to must be a gripper position")
     if args.close_to is not None and args.close_steps < 1:
         ap.error("--close-steps must be at least 1")
+    if args.settle_s < 0.0:
+        ap.error("--settle-s must be non-negative")
     if args.ramp_travel <= 0.0:
         ap.error("--ramp-travel must be positive")
     if args.ramp_travel > args.max_travel:
