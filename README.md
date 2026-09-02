@@ -26,6 +26,22 @@ operator tested.
 | PV grip-supervised deployment | `./scripts/run_deploy_grip_ee.sh` | no |
 | OAK-D depth hand tracking (opt-in) | `--oak` / `probe_oak.sh` | yes, on depthai 2.32 |
 
+## Data and policies
+
+No dataset or checkpoint is in Git. The recordings and the trained policies live
+on the Hugging Face Hub, and `docs/DATASETS.md` maps each one to what it was
+built from:
+
+- **datasets** — `hand_tracking_pv_carton_dual_view` (the raw carton
+  recordings), `..._middle_standard`, `..._phase_b`, `hand_tracking_pick_place`
+- **policies** — [`act_pickplace`](https://huggingface.co/stevenzenith/act_pickplace)
+  and [`dp_pickplace`](https://huggingface.co/stevenzenith/dp_pickplace) are
+  public; the carton-line ACT, Diffusion and SmolVLA checkpoints are not
+
+Most of those repositories, and this one, are **private**. The links resolve for
+whoever has access and 404 for everyone else. Publishing any of it is a separate
+decision, recorded in `docs/RELEASE_AUDIT.md` as not taken.
+
 **Read `docs/CLAIMS_AND_GATES.md` and `docs/RELEASE_AUDIT.md` before citing any
 result from this repository.** They separate what has run on the arm from what has
 only passed software checks, and name the gates still open. The PV force-control
