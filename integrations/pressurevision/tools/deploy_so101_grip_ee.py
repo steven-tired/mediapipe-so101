@@ -1217,6 +1217,10 @@ def main():
                     help="how long the body commands must hold still to count as a stall")
     ap.add_argument("--stall-epsilon", type=float, default=0.05,
                     help="body command deviation that still counts as holding still")
+    ap.add_argument("--no-relax-on-exit", dest="relax_on_exit", action="store_false",
+                    help="leave torque on when the run ends. Default is to drop it: wrist_roll "
+                         "draws current and heats while energised and then stops answering the "
+                         "bus, and every recovery so far has been to relax it.")
     ap.add_argument("--paired-boundaries", action="store_true",
                     help="collect a lift and a slip boundary within each grasp: tighten to "
                          "break a stall, then loosen after the lift until the carton drops. "
@@ -1440,7 +1444,6 @@ def main():
     paired_operator = None
     evidence = None
     connected = False
-    operator_stopped = False
     normal_exit = False
     run_status = "failed"
     run_error = None
@@ -1905,11 +1908,6 @@ def main():
         elapsed = time.perf_counter() - run_started
         active_elapsed = elapsed - paused_elapsed_s
         print(f"[deploy] done — {n} steps ({n / active_elapsed:.1f} Hz).")
-        operator_stopped = (
-            (paired_operator is not None and paired_operator.stop)
-            or (stall_operator is not None and stall_operator.stop)
-            or (grip_intervention is not None and grip_intervention.stop)
-        )
         normal_exit = True
         run_status = "complete"
     except KeyboardInterrupt:
@@ -2021,7 +2019,11 @@ def main():
                     f"loosen_steps={paired.loosen_steps}"
                 )
         if connected:
-            if operator_stopped:
+            if args.relax_on_exit:
+                # Every exit, not only the operator's stop. trial10 ran to its
+                # step limit, so nothing relaxed, the arm sat energised in a
+                # skewed pose, and the next run died at connect on a missing
+                # id 5 -- the fourth time that sequence has played out.
                 relax_all_joints(robot)
             # disconnect with torque held (disable_torque_on_disconnect=False) so the arm keeps its pose.
             robot.disconnect()
