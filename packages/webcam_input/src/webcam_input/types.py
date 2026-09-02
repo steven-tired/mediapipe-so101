@@ -17,3 +17,19 @@ class WristData:
 class LandmarksData:
     landmarks: np.ndarray     # (21, 3) MANO joint_pos from SingleHandDetector
     valid: bool
+    image_xy: np.ndarray | None = None    # optional (21, 2), normalized OAK/RGB coordinates
+    depth_m: np.ndarray | None = None     # optional (21,), aligned depth in metres
+    # Host-monotonic read-completion metadata, not a sensor exposure timestamp.
+    observed_at_s: float | None = None
+    frame_id: int | None = None
+
+
+@dataclass(frozen=True)
+class WebcamSample:
+    """One atomic webcam publication from a single captured frame."""
+
+    preview_frame: np.ndarray | None
+    wrist: WristData
+    landmarks: LandmarksData
+    observed_at_s: float | None
+    frame_id: int | None

@@ -57,7 +57,7 @@ def test_latest_frame_is_safe_before_any_start():
     assert source.latest_frame() is None
 
 
-@pytest.mark.parametrize("attr", ["_latest_frame", "_mp_draw", "_mp_conns"])
+@pytest.mark.parametrize("attr", ["_latest_sample", "_mp_draw", "_mp_conns"])
 def test_preview_state_exists_before_any_start(attr):
     source = WebcamSource(WebcamWristEstimator(ScaleDepthStrategy(), workspace_size_m=0.3))
     assert hasattr(source, attr), f"{attr} is created by a start path, not by __init__"
@@ -66,5 +66,48 @@ def test_preview_state_exists_before_any_start(attr):
 def test_both_capture_loops_publish_a_preview_frame():
     """A preview that only works with an OAK makes the monocular mode unusable."""
     for loop in (WebcamSource._loop, WebcamSource._loop_oak):
-        assert "_latest_frame" in assigned_self_attributes(loop), \
+        source = inspect.getsource(loop)
+        assert "_publish_sample(" in source, \
             f"{loop.__name__} never publishes a preview frame"
+
+
+def test_publishing_is_one_locked_assignment():
+    """Frame, wrist, landmarks and frame_id must reach readers as one object.
+
+    They used to be three fields written in sequence under the lock. The
+    recorder's hand-startup gate advances on frame_id changing and reads
+    validity from the same publication, so any path that assigns them
+    separately can hand it this frame's id beside the last frame's hand.
+    """
+    published = assigned_self_attributes(WebcamSource._publish_sample)
+    assert "_latest_sample" in published
+    assert "_latest" not in published and "_latest_frame" not in published
+
+
+def test_stop_is_idempotent():
+    """ESC at the end of an episode called stop() twice and MediaPipe raised.
+
+    The recorder registers `source.stop` on its ExitStack *and* stops the source
+    in its own teardown. The second `Hands.close()` raises "Closing
+    SolutionBase._graph which is already None", so a clean operator abort ended
+    in a traceback -- after the episode and its analysis were already written.
+    """
+    class Handle:
+        def __init__(self):
+            self.closes = 0
+
+        def close(self):
+            self.closes += 1
+            if self.closes > 1:
+                raise ValueError("Closing SolutionBase._graph which is already None")
+
+        release = stop = close
+
+    source = WebcamSource(WebcamWristEstimator(ScaleDepthStrategy(), workspace_size_m=0.3))
+    hands, cap, oak = Handle(), Handle(), Handle()
+    source._hands, source._cap, source._oak = hands, cap, oak
+
+    source.stop()
+    source.stop()
+
+    assert (hands.closes, cap.closes, oak.closes) == (1, 1, 1)

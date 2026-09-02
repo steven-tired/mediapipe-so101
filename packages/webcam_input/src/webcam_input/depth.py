@@ -89,3 +89,16 @@ class OAKDepthStrategy(DepthStrategy):
             return self._z   # hole -> hold last good
         self._z = self.ema_alpha * z + (1.0 - self.ema_alpha) * self._z
         return self._z
+
+    def sample_landmark_depths(self, image_landmarks, image_shape) -> np.ndarray:
+        image_landmarks = np.asarray(image_landmarks, dtype=float)
+        depths = np.full((image_landmarks.shape[0],), np.nan, dtype=float)
+        if self._depth_mm is None:
+            return depths
+        for index, xy in enumerate(image_landmarks):
+            if np.allclose(xy, 0.0):
+                continue
+            z = sample_depth_m(self._depth_mm, xy, self.radius_px, self.min_m, self.max_m)
+            if z is not None:
+                depths[index] = z
+        return depths
