@@ -191,3 +191,40 @@ def test_the_logged_spread_is_what_was_measured_not_zero_on_reset():
     still = detector.update(t=0.2, body_command=[-19.32 + 3.0, 35.82])
     assert still["command_spread"] == 0.0
     assert still["reference_reset"] is False
+
+
+def test_an_operator_can_drive_the_ramp_while_the_body_keeps_moving():
+    """attempt04's failure: a grasp held too loosely while ACT keeps moving.
+
+    The detector never fires on it -- the longest still window was 0.50 s
+    against a 2 s threshold -- and no automatic lift detector survived
+    validation, so a person decides.
+    """
+    ramp = StallTightenRamp(_config(floor_pos=5.0), stall=StallConfig(window_s=2.0))
+    actual = 29.0
+    engaged = False
+    trace = []
+    for index in range(60):
+        t = index / 10.0
+        if t >= 2.0:
+            engaged = True
+        target, label = ramp.update(
+            t=t, policy_target=29.0, actual_pos=actual,
+            body_command=lifting(t), engaged=engaged,
+        )
+        actual = target
+        trace.append(label)
+    assert not any(label["stalled"] for label in trace), "the body never stopped moving"
+    assert ramp.total_steps_applied == 7
+    assert ramp.deepest_target == pytest.approx(29.0 - 7 * 2.0)
+
+
+def test_the_detector_still_records_while_the_operator_drives():
+    ramp = StallTightenRamp(_config(), stall=StallConfig(window_s=2.0))
+    labels = [
+        ramp.update(t=i / 10.0, policy_target=29.0, actual_pos=29.0,
+                    body_command=STALLED, engaged=False)[1]
+        for i in range(40)
+    ]
+    assert labels[-1]["stalled"] is True, "the detector keeps its own verdict"
+    assert ramp.total_steps_applied == 0, "but it did not drive the ramp"

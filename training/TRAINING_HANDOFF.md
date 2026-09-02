@@ -1399,6 +1399,66 @@ and one encoder quantum. `summary.json` in that evidence directory still holds
 the bad `noise_floor` and `smallest_resolvable_step` fields from the original
 run; the per-tread records beside them are good.
 
+## The tighten ramp is operator-triggered, on 2026-09-02 bench evidence
+
+The stall detector fired on nothing across three bench runs, and the reason is
+that trial05's stall is not the common failure.
+
+`attempt04` is the run that matters. With the carton placed to match the demos,
+ACT approached, closed to a command of `28.94` (readback `29.97`), and **held
+that grasp for 48 seconds without lifting**, moving the whole time. Its longest
+still window was `0.50 s` against the `2 s` threshold, so a stall-triggered ramp
+never engages. The depth is the point: `28.94` sits well inside the region the
+2026-08-31 runs never lifted from (lifts closed to `25.40` or tighter, failures
+no tighter than `26.04`). This is precisely the case a tighten ramp is for, and
+the trigger could not see it.
+
+An automatic lift detector was tried and rejected. The largest drop in
+`elbow_flex` over any 3 s closed window looked promising -- `14.61` on trial05
+against `2.46` on attempt04 -- but against the recorded outcomes it does not
+separate at all:
+
+| Outcome | elbow_flex drop over 3 s |
+| --- | --- |
+| lifted | 7.50, 9.37, 12.63, 14.54, 14.61, 18.08 |
+| did not lift | 3.70, 7.59, 8.21, 10.88 |
+
+A failed run scores `10.88` and a successful one `7.50`. The measure tracks how
+much ACT moves its elbow, not whether the carton left the table.
+
+So a person presses a key when the carton is gripped and will not come up, and
+the ramp runs from there. The stall detector still runs and is still logged on
+every cycle -- it is validated (trial05 holds still for `9.09 s` at every
+epsilon from `0.00` to `0.20`, while a moving run never exceeds `0.10 s` at
+`0.05`) and its record is what would let an automatic trigger be built and
+checked later. It is no longer the trigger.
+
+This changes what the baseline is. It is no longer an autonomous controller, so
+it does not measure an autonomous no-lift rate. It measures whether tightening
+at the calibrated step recovers a grasp a person judged inadequate, and at what
+depth. A learned head still has to beat it, and now also has to supply the
+judgement the person is currently supplying.
+
+### The physical contract has to be passed explicitly
+
+Two of the three 2026-09-02 bench runs failed for setup reasons, not policy
+reasons, and both are cheap to avoid.
+
+`attempt01` started from whatever pose the deadband calibration had left, with
+the gripper already closed at `31`. ACT opened it at `6.4 s` and never closed
+again for the remaining 114 s. `attempt02` and later pass
+`--start-joints 1.32,-38.42,42.68,86.2,0.92,99.34`.
+
+`attempt03` ran with `--act-action-steps` defaulting to 1 and
+`--action-step-repeat` 1, against the contract's 14 and 2 -- an executed prefix
+of one action per inference, at twice the trajectory speed. It also had the
+carton rotated 180 degrees from the demo orientation and shifted right, which
+sent `shoulder_pan` to `+14.81` where every successful run goes to `-21.12`.
+The full contract is `--start-joints 1.32,-38.42,42.68,86.2,0.92,99.34
+--act-action-steps 14 --action-step-repeat 2 --max-steps 300`, and the carton
+must match the demo frame: cap to the right, blue nutrition panel facing the
+camera, near the front edge.
+
 ### Next gates after 2026-09-02
 
 Gate 1 is closed and gate 2 is implemented but unrun. Renumbering the rest

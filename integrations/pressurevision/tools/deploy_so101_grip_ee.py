@@ -458,6 +458,57 @@ class GripInterventionController:
         cv2.destroyWindow(self.window_name)
 
 
+class TightenRampOperator:
+    """Keyboard trigger for the standalone tighten ramp.
+
+    One key, because there is exactly one thing here a person can see and the
+    machine cannot: the carton is grasped and is not coming up. The stall
+    detector only recognises trial05's frozen commands, and no automatic lift
+    detector separated lift from no-lift on the recorded runs -- elbow_flex
+    drop over a 3 s window scored 3.70 to 10.88 on runs that did not lift and
+    7.50 to 18.08 on runs that did.
+    """
+
+    def __init__(self):
+        self.engaged = False
+        self.stop = False
+        self.window_name = "Tighten ramp: t = grasped but not lifting | q stop"
+
+    def start(self) -> None:
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.window_name, 760, 160)
+
+    def poll_input(self, ramp) -> None:
+        canvas = np.zeros((160, 760, 3), dtype=np.uint8)
+        deepest = ramp.deepest_target
+        for index, (text, colour) in enumerate((
+            (
+                "TIGHTENING" if self.engaged else "watching; press t if it grips but will not lift",
+                (0, 255, 0) if self.engaged else (0, 200, 255),
+            ),
+            (
+                f"steps {ramp.total_steps_applied}   deepest "
+                f"{'--' if deepest is None else f'{deepest:.2f}'}   "
+                f"floor {'REACHED' if ramp.reached_floor else 'clear'}",
+                (255, 255, 255),
+            ),
+            ("t = toggle tighten | q stop", (180, 180, 180)),
+        )):
+            cv2.putText(canvas, text, (20, 45 + index * 45),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.62, colour, 2)
+        cv2.imshow(self.window_name, canvas)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("t"):
+            self.engaged = not self.engaged
+            print(f"[tighten ramp] {'ENGAGED' if self.engaged else 'released'}")
+        elif key in {ord("q"), 27}:
+            self.stop = True
+
+    def close(self) -> None:
+        self.stop = True
+        cv2.destroyWindow(self.window_name)
+
+
 class PairedBoundaryOperator:
     """Keyboard front end for the paired lift/slip collection.
 
@@ -470,7 +521,7 @@ class PairedBoundaryOperator:
     def __init__(self, protocol: PairedBoundaryProtocol):
         self.protocol = protocol
         self.stop = False
-        self.window_name = "Paired boundaries: l = lifted | d = dropped | q stop"
+        self.window_name = "Paired boundaries: t = tighten | l = lifted | d = dropped | q stop"
 
     def start(self) -> None:
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
@@ -480,7 +531,7 @@ class PairedBoundaryOperator:
         canvas = np.zeros((220, 760, 3), dtype=np.uint8)
         phase = self.protocol.phase
         prompt = {
-            "following": "ACT running; press l once the carton is STABLY LIFTED",
+            "following": "press t if it grips but will not lift; l once STABLY LIFTED",
             "loosening": "loosening until it drops; press d THE MOMENT it lets go",
             "done": "done; both branches recorded",
         }[phase]
@@ -494,13 +545,20 @@ class PairedBoundaryOperator:
                 f"slip boundary: {'--' if slip is None else f'{slip:.2f}'}",
                 (255, 255, 255),
             ),
-            ("l = lifted | d = dropped | q stop", (180, 180, 180)),
+            (
+                f"tighten: {'ON' if self.protocol.tighten_engaged else 'off'}    "
+                "t = tighten | l = lifted | d = dropped | q stop",
+                (180, 180, 180),
+            ),
         )):
             cv2.putText(canvas, text, (20, 45 + index * 45),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.62, colour, 2)
         cv2.imshow(self.window_name, canvas)
         key = cv2.waitKey(1) & 0xFF
-        if key == ord("l"):
+        if key == ord("t"):
+            self.protocol.set_tighten(not self.protocol.tighten_engaged)
+            print(f"[paired] tighten {'ENGAGED' if self.protocol.tighten_engaged else 'released'}")
+        elif key == ord("l"):
             self.protocol.confirm_lift()
             print("[paired] lift confirmed; loosening starts")
         elif key == ord("d"):
@@ -1295,6 +1353,7 @@ def main():
     grip_intervention = None
     grip_candidate_trial = None
     stall_tighten = None
+    stall_operator = None
     paired = None
     paired_operator = None
     evidence = None
@@ -1418,11 +1477,14 @@ def main():
                     motion_epsilon=args.stall_epsilon,
                 ),
             )
+            stall_operator = TightenRampOperator()
+            stall_operator.start()
             print(
-                f"[stall ramp] no-learning baseline: after {args.stall_window_s:g}s of still "
-                f"body commands, tighten {args.stall_tighten_step:g} every "
+                f"[tighten ramp] focus the window and press 't' when the carton is gripped but "
+                f"will not come up: tighten {args.stall_tighten_step:g} every "
                 f"{args.stall_tighten_interval_s:g}s down to a floor of "
-                f"{args.stall_tighten_floor:g}, then hand back to ACT"
+                f"{args.stall_tighten_floor:g}. Press 't' again to hand back to ACT. "
+                "The stall detector still records, but does not drive the ramp."
             )
         if args.grip_intervention_step:
             grip_intervention = GripInterventionController(
@@ -1494,6 +1556,7 @@ def main():
             (correction_toggle is not None and correction_toggle.stop)
             or (grip_intervention is not None and grip_intervention.stop)
             or (paired_operator is not None and paired_operator.stop)
+            or (stall_operator is not None and stall_operator.stop)
             or (grip_candidate_trial is not None and grip_candidate_trial.stop)
         ):
             t0 = time.perf_counter()
@@ -1501,6 +1564,8 @@ def main():
                 grip_intervention.poll_input()
             if paired_operator is not None:
                 paired_operator.poll_input()
+            if stall_operator is not None:
+                stall_operator.poll_input(stall_tighten)
             if grip_candidate_trial is not None:
                 grip_candidate_trial.poll_input()
             obs = robot.get_observation()
@@ -1609,6 +1674,7 @@ def main():
                     policy_target=float(a[gripper_index]),
                     actual_pos=actual_gripper,
                     body_command=np.delete(a, gripper_index),
+                    engaged=stall_operator.engaged,
                 )
             elif grip_candidate_trial is not None:
                 a[gripper_index], grip_candidate_control = grip_candidate_trial.update(
@@ -1754,6 +1820,8 @@ def main():
     finally:
         if correction_toggle is not None:
             correction_toggle.close()
+        if stall_operator is not None:
+            stall_operator.close()
         if paired_operator is not None:
             paired_operator.close()
         if grip_intervention is not None:

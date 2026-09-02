@@ -50,11 +50,35 @@ def _run(protocol, *, seconds, body_at, policy_target=28.0, hz=10.0, events=()):
     return trace
 
 
-def test_a_stall_is_tightened_and_the_depth_that_broke_it_is_the_lift_boundary():
+def test_the_operator_drives_the_tighten_branch_and_the_depth_is_the_lift_boundary():
+    """The trigger is a person, not the stall detector.
+
+    The detector only recognises trial05's frozen commands, and the common
+    bench failure is a grasp held too loosely while the arm keeps moving. No
+    automatic lift detector separated the two on recorded runs.
+    """
     protocol = _protocol()
-    _run(protocol, seconds=10.0, body_at=lambda t: STALLED if t < 6.0 else lifting(t - 6.0))
+    protocol.set_tighten(True)
+    _run(protocol, seconds=10.0,
+         body_at=lambda t: STALLED if t < 6.0 else lifting(t - 6.0),
+         events=[(6.0, "confirm_lift")])
     assert protocol.lift_boundary is not None
     assert protocol.lift_boundary < 28.0
+
+
+def test_confirming_the_lift_also_stops_the_tighten_ramp():
+    """Otherwise a forgotten second press keeps driving into a lifted carton."""
+    protocol = _protocol()
+    protocol.set_tighten(True)
+    protocol.confirm_lift()
+    assert protocol.tighten_engaged is False
+
+
+def test_nothing_tightens_until_the_operator_engages():
+    protocol = _protocol()
+    _run(protocol, seconds=10.0, body_at=lambda t: STALLED)
+    assert protocol.tighten_ramp.total_steps_applied == 0
+    assert protocol.lift_boundary is None
 
 
 def test_the_loosen_ramp_runs_after_a_lift_and_stops_on_the_drop():

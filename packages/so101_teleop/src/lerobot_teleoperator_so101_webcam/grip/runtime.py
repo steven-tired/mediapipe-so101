@@ -239,6 +239,10 @@ class StallTightenRamp:
 
     def __init__(self, config: TightenRampConfig, *, stall: StallConfig | None = None):
         self.config = config
+        # The detector still runs on every cycle even when the ramp is driven
+        # by an operator, because its output is the record that would let an
+        # automatic trigger be validated later. It is not the trigger unless
+        # `engaged` is left unset.
         self.detector = BodyStallDetector(stall)
         self.reset()
 
@@ -258,9 +262,28 @@ class StallTightenRamp:
         self.deepest_target: float | None = None
         self.reached_floor = False
 
-    def update(self, *, t: float, policy_target: float, actual_pos: float, body_command):
-        """Return the gripper target to command, and what was decided."""
+    def update(
+        self,
+        *,
+        t: float,
+        policy_target: float,
+        actual_pos: float,
+        body_command,
+        engaged: bool | None = None,
+    ):
+        """Return the gripper target to command, and what was decided.
+
+        `engaged` overrides the stall detector as the trigger. It exists
+        because the detector only recognises one failure: trial05's frozen
+        commands. The 2026-09-02 bench runs showed the common failure is a
+        grasp that is held too loosely while the arm keeps moving, which the
+        detector never fires on, and no automatic lift detector survived
+        validation -- elbow_flex drop over a 3 s window scored 3.70 to 10.88 on
+        runs that did not lift and 7.50 to 18.08 on runs that did, which does
+        not separate. So a person decides, and the detector keeps recording.
+        """
         stall = self.detector.update(t=t, body_command=body_command)
+        active = stall["stalled"] if engaged is None else bool(engaged)
         policy_target = float(policy_target)
         actual_pos = float(actual_pos)
 
@@ -270,7 +293,7 @@ class StallTightenRamp:
             self._release()
             return policy_target, self._label(stall, "release", 0.0)
 
-        if not stall["stalled"]:
+        if not active:
             if self.target is not None:
                 # The stall broke while we were ramping. Only a ramp that
                 # actually tightened produced a boundary: if the body resumed
@@ -404,6 +427,7 @@ class PairedBoundaryProtocol:
         self._last_step_at_s: float | None = None
         self._lift_requested = False
         self._drop_requested = False
+        self.tighten_engaged = False
 
     @property
     def freeze_body(self) -> bool:
@@ -414,9 +438,20 @@ class PairedBoundaryProtocol:
         """
         return self.phase == "loosening"
 
+    def set_tighten(self, engaged: bool) -> None:
+        """Operator: the carton is grasped but not coming up. Start/stop tightening."""
+        self.tighten_engaged = bool(engaged)
+
     def confirm_lift(self) -> None:
-        """Operator: the carton is stably lifted. Starts the loosen ramp."""
+        """Operator: the carton is stably lifted. Starts the loosen ramp.
+
+        This also disengages the tighten ramp, because the carton coming up is
+        exactly the moment tightening should stop. Leaving that as a separate
+        key would let a ramp keep driving into a carton it had already lifted,
+        on the operator forgetting one of two presses.
+        """
         self._lift_requested = True
+        self.tighten_engaged = False
 
     def mark_drop(self) -> None:
         """Operator: the carton has dropped. Ends the loosen ramp."""
@@ -430,6 +465,13 @@ class PairedBoundaryProtocol:
 
         if self.phase == "following":
             if lift_requested:
+                # The lift is confirmed here, so this is where the tighten
+                # branch's label is taken. The ramp itself never sees a
+                # disengaged cycle in this path -- the phase changes first --
+                # so leaving the boundary to the ramp would drop it on exactly
+                # the trials where tightening bought the lift.
+                if self.lift_boundary is None and self.tighten_ramp.total_steps_applied:
+                    self.lift_boundary = actual_pos
                 self.phase = "loosening"
                 self._target = actual_pos
                 self._last_step_at_s = t
@@ -439,6 +481,7 @@ class PairedBoundaryProtocol:
                 policy_target=policy_target,
                 actual_pos=actual_pos,
                 body_command=body_command,
+                engaged=self.tighten_engaged,
             )
             if self.tighten_ramp.lift_boundary is not None and self.lift_boundary is None:
                 self.lift_boundary = self.tighten_ramp.lift_boundary
