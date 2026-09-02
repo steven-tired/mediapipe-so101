@@ -1,3 +1,5 @@
+import itertools
+
 import pytest
 from types import SimpleNamespace
 
@@ -7,6 +9,7 @@ from lerobot_teleoperator_so101_webcam.gripper_hardware import (
     GripperRuntimeTelemetry,
     GripperTelemetrySampler,
     TelemetrySnapshot,
+    read_gripper_runtime_telemetry,
     choose_three_grip_targets,
     serialize_telemetry_snapshot,
     slow_close_waypoints,
@@ -276,6 +279,66 @@ def test_runtime_sampler_reads_only_at_requested_cadence():
         ("Present_Temperature", "gripper"),
         ("Present_Load", "gripper"),
     ]
+
+
+def _robot(read):
+    return SimpleNamespace(
+        get_observation=lambda: {"gripper.pos": 27.5},
+        bus=SimpleNamespace(read=read),
+    )
+
+
+def test_a_bus_fault_leaves_the_register_blank_rather_than_zero():
+    """The servo did not answer. That is a missing value, not a reading of 0."""
+
+    def read(register, motor, **_kwargs):
+        if register == "Present_Load":
+            raise ConnectionError("no response from servo")
+        return 12
+
+    telemetry = read_gripper_runtime_telemetry(_robot(read), clock=lambda: 10.0)
+
+    assert telemetry.present_load is None
+    assert telemetry.present_current == 12
+
+
+def test_a_register_name_the_control_table_does_not_have_raises():
+    """The failure this exists to prevent: a typo'd register name used to be
+    swallowed into `None`, so three columns came out permanently blank with
+    nothing logged. A bug in this file must be loud."""
+
+    def read(register, motor, **_kwargs):
+        raise KeyError(f"Address for '{register}' not found in sts3215 control table.")
+
+    with pytest.raises(KeyError):
+        read_gripper_runtime_telemetry(_robot(read), clock=lambda: 10.0)
+
+
+def test_the_sampler_rides_out_a_bus_fault_but_not_a_wrong_register():
+    """`poll` keeps the last good sample across a dropped port -- a control loop
+    must survive one -- but a wrong register or a wrong robot is not a hiccup,
+    and holding a stale sample would hide it for the whole run."""
+    ticks = itertools.count(10.0, 0.1)
+    sampler = GripperTelemetrySampler(interval_s=0.05, clock=lambda: next(ticks))
+
+    good = sampler.poll(_robot(lambda register, motor, **_kwargs: 12))
+    assert good.present_load == 12
+
+    dropped = SimpleNamespace(
+        get_observation=_raise(ConnectionError("port dropped")),
+        bus=SimpleNamespace(read=lambda register, motor, **_kwargs: 12),
+    )
+    assert sampler.poll(dropped) is good
+
+    with pytest.raises(KeyError):
+        sampler.poll(_robot(_raise(KeyError("Present_Lodd"))))
+
+
+def _raise(exc):
+    def fail(*_args, **_kwargs):
+        raise exc
+
+    return fail
 
 
 def test_slow_close_waypoints_are_monotonic_and_include_target():

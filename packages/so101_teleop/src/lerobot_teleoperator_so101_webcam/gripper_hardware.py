@@ -229,7 +229,10 @@ class GripperTelemetrySampler:
         self._last_attempt_at_s = now
         try:
             self.latest = read_gripper_runtime_telemetry(robot, clock=self.clock)
-        except (ConnectionError, KeyError, TypeError, ValueError):
+        except BUS_FAULTS:
+            # Ride out a bus fault on the last good sample. A `KeyError` or
+            # `TypeError` from here is a wrong register or a wrong robot, not a
+            # hiccup, and keeping a stale sample would hide it for the whole run.
             pass
         return self.latest
 
@@ -305,10 +308,21 @@ def choose_three_grip_targets(records: list[dict[str, float]], min_current_gap: 
     }
 
 
+#: Faults the bus itself can raise on a good call: the port dropped, or the servo
+#: answered with an error packet. `ConnectionError` -- and LeRobot's
+#: `DeviceNotConnectedError`, and pyserial's `SerialException` -- are all `OSError`.
+#:
+#: Deliberately not `Exception`: a register name that is not in the control table
+#: raises `KeyError`, and swallowing that turned a typo into three permanently
+#: blank telemetry columns with nothing logged anywhere. A fault we cannot read
+#: through is a missing value; a fault in this file is a bug and must be loud.
+BUS_FAULTS = (OSError, RuntimeError)
+
+
 def _read_reg(robot, reg: str, motor: str) -> int | None:
     try:
         return int(robot.bus.read(reg, motor, normalize=False, num_retry=5))
-    except Exception:
+    except BUS_FAULTS:
         return None
 
 
