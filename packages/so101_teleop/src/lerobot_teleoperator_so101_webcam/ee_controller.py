@@ -302,6 +302,16 @@ class WebcamEEController:
 
     def step(self, wrist, landmarks):
         """Return (joint_targets | None, state). None = HOLD (no new command; arm holds last)."""
+        # ONE clock read per control frame, the way the pre-migration controller did it.
+        # This is the time base for the PV low-pass and for every duration the
+        # adjustment lock measures (the 1.0 s release latch, the 0.15 s re-contact).
+        # It was migrated as `wrist.observed_at_s if hasattr(...) else 0.0`; WristData
+        # has no such field, so it read 0.0 on every frame. dt was therefore always
+        # zero, the low-pass alpha was always zero, PV pressure never moved the filter
+        # off its initial 0.0, and every lock duration stayed at 0.0 -- pressing the pad
+        # changed nothing while the telemetry still reported the reading as active.
+        # Do not source this from the payload: the fix is a clock, not a field.
+        control_observed_at_s = time.perf_counter()
         if self.pipeline is None:
             raise RuntimeError("WebcamEEController.build(ee_centre) must be called before step().")
         lm = np.asarray(landmarks.landmarks, dtype=float)
@@ -347,7 +357,9 @@ class WebcamEEController:
             self.roll_ref = None
             self.smoothed = None
             self.gripper.reset()
-            self._disarm_gripper(pinch, wrist, transition="middle")
+            self._disarm_gripper(
+                pinch, wrist, transition="middle", observed_at_s=control_observed_at_s
+            )
             self.cmd_state = dict(self.middle_pose)
             return dict(self.middle_pose), "MIDDLE"
 
@@ -361,7 +373,7 @@ class WebcamEEController:
             # Overdrive and the asymmetric close/open smoothing live in the gripper
             # controller now. severity is the pinch mapping normalised: 1 = grip hardest.
             severity = 1.0 - raw_grip_from_pinch(pinch, self.cfg, grip_map=self.grip_map) / 100.0
-            observed_at_s = wrist.observed_at_s if hasattr(wrist, "observed_at_s") else 0.0
+            observed_at_s = control_observed_at_s
             # A gripper that reads its own sensor gets the frame here. This hook
             # is the whole reason the core never has to import an integration
             # package: it is satisfied by duck typing, not by an import.
@@ -386,7 +398,9 @@ class WebcamEEController:
         # told: the hand left, so whatever zero it calibrated against may no
         # longer hold. Continuing from a stale baseline is how a sensor keeps
         # commanding force against a scene it can no longer see.
-        self._disarm_gripper(pinch, wrist, transition="hold")
+        self._disarm_gripper(
+            pinch, wrist, transition="hold", observed_at_s=control_observed_at_s
+        )
         return None, "HOLD"
 
     def _middle_requested(self, wrist, landmarks, lm) -> bool:
@@ -419,8 +433,14 @@ class WebcamEEController:
         )
         return self.middle_gesture_active
 
-    def _disarm_gripper(self, pinch, wrist, *, transition: str) -> None:
-        """Tell a sensing gripper this frame produced no command. Optional hook."""
+    def _disarm_gripper(self, pinch, wrist, *, transition: str, observed_at_s: float) -> None:
+        """Tell a sensing gripper this frame produced no command. Optional hook.
+
+        `observed_at_s` is the caller's single clock read for this control frame:
+        the lock measures its release and re-contact durations against it, so a
+        disarm carrying a different time base than the step that preceded it would
+        make those durations meaningless.
+        """
         disarm = getattr(self.gripper, "disarm", None)
         if disarm is None:
             return
@@ -431,7 +451,7 @@ class WebcamEEController:
                 explicit_release=False,
                 severity=severity,
                 valid=True,
-                observed_at_s=wrist.observed_at_s if hasattr(wrist, "observed_at_s") else 0.0,
+                observed_at_s=observed_at_s,
             ),
             self.cmd_state.get("gripper.pos", 50.0),
             transition=transition,
