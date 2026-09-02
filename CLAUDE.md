@@ -31,11 +31,18 @@ training/, local/          checkpoints and evidence (local/ is git-ignored)
 ## Running things
 
 ```bash
-env -u PYTHONPATH ../.venv-lerobot/bin/python -m pytest -q     # 502 tests
+env -u PYTHONPATH ../.venv-lerobot/bin/python -m pytest -q     # 745 tests
 ./scripts/run_arm_ee.sh        # live EE teleop      (wrappers resolve their own paths)
 ./scripts/run_record_ee.sh     # record demos
 ./scripts/run_deploy_ee.sh     # autonomous policy, DDIM @ 10 steps (~9 Hz)
+
+./scripts/run_record_pv_ee.sh  # PV-supervised recording: sender + recorder, two processes
+./scripts/run_deploy_grip_ee.sh  # deploy with grip supervision (residual head, intervention)
 ```
+
+The two PV wrappers need `integrations/pressurevision/tools` on the path, which
+they add themselves. The PV sender needs its own environment (torch +
+segmentation-models-pytorch): point `SO101_PV_PYTHON` at that interpreter.
 
 `scripts/_common.sh` **prepends** this repo's src dirs to PYTHONPATH, to defeat
 a stale editable install of the pre-split package. Keep it that way.
