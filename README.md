@@ -123,7 +123,8 @@ uv pip install --override overrides.txt \
 
 `feetech` is the servo bus, `dataset` the LeRobot dataset stack, `placo-dep` the
 IK solver. This resolves to numpy 2.2.6, mediapipe 0.10.21, placo 0.9.15,
-feetech-servo-sdk 1.0.0 and torch 2.11.0+cu128.
+feetech-servo-sdk 1.0.0 and torch 2.11.0+cu128 — the versions listed under
+"The environment this was built on" below.
 
 For the OAK-D path only:
 
@@ -206,6 +207,41 @@ an overhead camera on the pad and a side camera distinct from the workspace one.
 An SO-101 on a Feetech bus, a camera for the hand, and a workspace camera. The
 PV path adds an overhead pad camera and a distinct side camera. An OAK-D is
 optional and replaces the hand camera with metric stereo depth.
+
+### The environment this was built on
+
+Everything above is the recipe that produced **this** machine's working setup,
+written down after the fact. It has not been rebuilt from an empty environment,
+and no other configuration has been tried. Treat it as "known to work here",
+not as a support matrix — if your setup differs, the recipe is a starting point
+rather than a guarantee.
+
+| | |
+| --- | --- |
+| OS | Ubuntu 26.04 "Resolute Raccoon", kernel 7.0.4-76070004 (System76) |
+| CPU / RAM | Intel Core i9-14900HX, 32 threads, 62 GiB |
+| GPU | RTX 4060 Laptop, 8 GiB, driver 580.159.03 |
+| Python | 3.12.13, via uv 0.11.21 |
+| Robot | SO-101 follower, Feetech bus on a CH340 USB serial adapter |
+| Cameras | Chicony built-in (hand), Creative Live! Cam (workspace), Logitech C270 (PV pad), Etron USB2.0 (side) |
+| Depth | OAK-D on depthai 2.32.0.0 |
+
+Upstream checkouts, at the commits this was run against:
+
+| Repository | Commit |
+| --- | --- |
+| `huggingface/lerobot` | `da92db8` (declares 0.5.2) |
+| `wengmister/vr-dex-retargeting` | `664abe2` |
+| `TheRobotStudio/SO-ARM100` | `fda892c` |
+| `facebookresearch/PressureVision` | `16fd342` |
+
+Key resolved versions: numpy 2.2.6, mediapipe 0.10.21, torch 2.11.0+cu128,
+placo 0.9.15, opencv-python 4.11.0.86, feetech-servo-sdk 1.0.0, torchcodec
+0.11.1, av 15.1.0.
+
+The GPU is used for policy training and deployment only. Teleoperation and
+recording run CPU-only on purpose — the wrappers hide the GPU for those, because
+this laptop's dGPU wedges on wake from runtime suspend.
 
 ## Gripper modes
 
