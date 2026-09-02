@@ -26,7 +26,7 @@ about the repository today.
 | `training` | 33 |
 | guards (parse, imports, wrappers, boundaries) | the remainder |
 | Fresh clone into `/tmp`, tests run from it | **passed**, 2.4 MB, 128 tracked files, no `local/` |
-| Tracked developer paths (`/home/...`) | 0 |
+| Tracked developer paths (`/home/...`) in published Python | 0 (`scripts/smoke_env.sh` is this machine's env file and does carry them — see below) |
 | Tracked IR/FLIR/Lepton/thermal runtime references | 0 (outside the boundary tests' own patterns) |
 | Tracked `.mp4/.avi/.zip/.pt/.pth/.ckpt/.onnx` | 0 |
 | Largest tracked file | 61.6 KB |
