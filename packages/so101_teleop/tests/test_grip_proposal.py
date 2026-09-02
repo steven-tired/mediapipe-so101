@@ -201,3 +201,78 @@ def test_reset_error_is_preserved_as_fallback_reason():
 
     assert decision.state == "disarmed"
     assert decision.reason == "pressure_reset_error:RuntimeError:reset failed"
+
+
+# --- the fallback overdrive map ---
+# Migrated from the worktree's controller tests, where these were reachable only
+# through a fake robot and an IK pipeline. They belong to the pure module.
+
+def test_overdrive_with_no_reading_falls_back_to_the_fixed_shift():
+    module = _proposal_module()
+
+    assert module.apply_pressure_overdrive(60.0, 18.0, None) == 42.0
+
+
+def test_overdrive_scales_with_active_pressure_and_clips_at_closed():
+    module = _proposal_module()
+
+    assert module.apply_pressure_overdrive(60.0, 18.0, _reading(0.5)) == 51.0
+    assert module.apply_pressure_overdrive(10.0, 18.0, _reading(1.0)) == 0.0
+
+
+def test_an_inactive_reading_commands_the_base_aperture_unshifted():
+    """No contact means no reason to squeeze past the operator's own pinch."""
+    module = _proposal_module()
+
+    assert module.apply_pressure_overdrive(60.0, 18.0, _reading(0.0, active=False)) == 60.0
+
+
+# --- fault paths the controller tests used to reach indirectly ---
+
+def test_a_low_quality_reading_latches_and_holds_the_current_proposal():
+    """Quality is a separate gate from availability: a packet can arrive intact
+    and still not be worth acting on."""
+    module = _proposal_module()
+    proposal = module.PressureProposalStateMachine(initial_gripper=50.0)
+    baseline = proposal.update(60.0, _reading(0.0, active=False))
+
+    rejected = proposal.update(
+        60.0,
+        _reading(0.0, active=False, available=False, quality=0.4, status="low_quality"),
+    )
+
+    assert rejected.proposed_gripper == baseline.proposed_gripper
+    assert rejected.state == "fault_latched"
+    assert rejected.reason == "low_quality"
+
+
+def test_a_failure_after_a_baseline_never_increases_closure():
+    """The direction matters on its own: holding is safe, tightening on a lost
+    sensor is how an object gets crushed."""
+    module = _proposal_module()
+    proposal = module.PressureProposalStateMachine(initial_gripper=50.0)
+    previous = proposal.update(60.0, _reading(0.0, active=False))
+
+    failed = proposal.update(
+        60.0,
+        _reading(0.0, active=False, available=False, status="thermal_unavailable"),
+    )
+
+    assert failed.proposed_gripper >= previous.proposed_gripper
+    assert failed.proposed_gripper == previous.proposed_gripper
+    assert failed.state == "fault_latched"
+
+
+def test_a_decision_cannot_be_edited_after_the_fact():
+    """The decision is the audit record a recorded episode is read back with."""
+    from dataclasses import FrozenInstanceError
+
+    module = _proposal_module()
+    proposal = module.PressureProposalStateMachine(initial_gripper=50.0)
+    decision = proposal.update(
+        60.0,
+        _reading(0.0, active=False, available=False, status="thermal_unavailable"),
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        decision.state = "armed"

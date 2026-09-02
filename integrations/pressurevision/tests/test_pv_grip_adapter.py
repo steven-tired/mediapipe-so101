@@ -260,3 +260,45 @@ def test_a_dead_sender_does_not_stall_the_arm():
     joints, state = _step(controller)
 
     assert state == "MOVING" and joints is not None
+
+
+# --- PV absent, failing, or gone ---
+
+def test_a_clutch_on_the_first_frame_never_reaches_the_sender():
+    """The clutch returns to the middle pose before any grip work, so there is
+    no decision to record and nothing to ask the sender."""
+    source = FakeSource()
+    controller = _controller(_adapter(source))
+
+    joints, state = _step(controller, clutch=True)
+
+    assert state == "MIDDLE"
+    assert source.calls == 0
+
+
+def test_a_sender_that_dies_mid_grasp_holds_rather_than_reverting_to_pinch():
+    """The deliberate difference from the pre-split controller, which fell back
+    to the pinch path and kept driving. Swapping control laws mid-grasp is the
+    kind of change a bench test does not catch; holding the position the object
+    is already gripped at is the conservative half of the trade."""
+
+    class DiesAfter(FakeSource):
+        def update(self, landmarks, *, pinch, enabled):
+            if self.calls >= 8:
+                raise OSError("sender gone")
+            return super().update(landmarks, pinch=pinch, enabled=enabled)
+
+    adapter = _adapter(DiesAfter())
+    controller = _controller(adapter)
+    for _ in range(8):
+        joints, _ = _step(controller)
+    held = joints["gripper.pos"]
+
+    for _ in range(5):
+        joints, state = _step(controller)
+
+    assert state == "MOVING"
+    assert joints["gripper.pos"] == pytest.approx(held)
+    assert adapter.runtime.last_pressure_control.fault_latched
+    # The pinch path would have commanded ~0 here (pinch 0.03, overdrive 18).
+    assert joints["gripper.pos"] > 10.0
