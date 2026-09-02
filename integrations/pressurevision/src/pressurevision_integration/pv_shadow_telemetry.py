@@ -30,6 +30,7 @@ __all__ = [
     "PVShadowTelemetryLogger",
     "PVShadowTelemetrySample",
     "pv_shadow_row",
+    "pv_shadow_sample",
 ]
 
 PV_SHADOW_SCHEMA_VERSION = "7"
@@ -181,3 +182,79 @@ class PVShadowTelemetryLogger(ShadowTelemetryLogger):
             extra_row=pv_shadow_row,
             log_prefix=log_prefix,
         )
+
+
+def pv_shadow_sample(
+    runtime,
+    *,
+    control_observed_at_s: float,
+    state: str,
+    pinch: float,
+) -> PVShadowTelemetrySample | None:
+    """Assemble one v7 row from the PV runtime's state after a control frame.
+
+    The EE controller used to build this inline, which is what made every PV
+    column reachable only through a robot and an IK pipeline. It belongs here,
+    next to the columns it fills.
+
+    Returns None when there is no decision yet -- a frame before the first
+    control step has nothing to report, and inventing a row would put a
+    fabricated baseline into the training data.
+    """
+    decision = runtime.last_pressure_control
+    if decision is None:
+        return None
+    pressure = runtime.last_pressure
+    lock = runtime._lock
+    relative = runtime.last_relative_grip
+    track_hold = getattr(relative, "track_hold", None)
+    profile = runtime.object_profile
+    fallback_used = decision.reason not in {"active", "baseline"}
+    protocol = (
+        None
+        if runtime.trial_protocol is None
+        else runtime.trial_protocol.expected(control_observed_at_s)
+    )
+    if runtime._mapped:
+        mode = f"pv_{runtime.pv_mapping}_{'apply' if runtime.pressure_apply else 'shadow'}"
+    elif profile is not None:
+        mode = "pv_apply" if runtime.pressure_apply else "pv_shadow"
+    else:
+        mode = "ir_shadow"
+    return PVShadowTelemetrySample(
+        control_observed_at_s=float(control_observed_at_s),
+        state=state,
+        pinch=float(pinch),
+        roi_mode=getattr(pressure, "roi_mode", None),
+        pressure=pressure,
+        pressure_status=getattr(pressure, "status", decision.reason),
+        baseline_ready=decision.state == "armed" and not decision.fault_latched,
+        base_gripper_pos=decision.base_gripper,
+        proposed_gripper_pos=decision.proposed_gripper,
+        actual_gripper_pos=decision.actual_gripper,
+        fault_latched=decision.fault_latched,
+        fallback_used=fallback_used,
+        fallback_reason=decision.reason if fallback_used else None,
+        pv_adjustment_state=runtime.adjustment_state,
+        pv_adjustment_event=runtime.adjustment_event,
+        pv_adjustment_anchor_target=lock.anchor_target,
+        pv_adjustment_release_since_s=lock.release_since_s,
+        pv_adjustment_release_elapsed_s=lock.release_elapsed_s,
+        pv_adjustment_last_contact_at_s=lock.last_contact_at_s,
+        pv_adjustment_recontact_since_s=lock.recontact_since_s,
+        pressure_level=getattr(pressure, "level", None),
+        pressure_n_levels=getattr(pressure, "n_levels", None),
+        pressure_mode=mode,
+        object_id=None if profile is None else profile.object_id,
+        object_profile_sha256=runtime.object_profile_sha256,
+        trial_index=None if protocol is None else int(protocol["trial_index"]),
+        phase_index=None if protocol is None else int(protocol["phase_index"]),
+        expected_level=None if protocol is None else int(protocol["expected_level"]),
+        trial_phase=None if protocol is None else str(protocol["trial_phase"]),
+        relative_reference_pos=getattr(relative, "reference_pos", None),
+        relative_closure=getattr(relative, "relative_closure", None),
+        relative_mapping_status=getattr(relative, "status", None),
+        relative_track_hold_state=getattr(track_hold, "state", None),
+        relative_track_hold_residual=getattr(track_hold, "robust_residual", None),
+        relative_track_hold_output=getattr(track_hold, "output_value", None),
+    )

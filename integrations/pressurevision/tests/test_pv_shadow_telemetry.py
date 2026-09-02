@@ -197,3 +197,93 @@ def test_an_inactive_reading_keeps_its_provenance(tmp_path: Path):
 
     assert row["pressure_status"] == "no_contact"
     assert row["pv_sequence"] == "12"
+
+
+# --- assembling a row from the runtime ---
+
+class _BaselineThenPress:
+    def __init__(self):
+        self.calls = 0
+
+    def update(self, landmarks, *, pinch, enabled):
+        self.calls += 1
+        if self.calls == 1:
+            return PressureReading(
+                pressure_0_1=0.0, active=False, quality=1.0,
+                available=True, status="baseline",
+            )
+        return PressureReading(
+            pressure_0_1=0.5, active=True, quality=1.0,
+            available=True, status="active", sequence=self.calls,
+        )
+
+
+def _runtime():
+    from pressurevision_integration.pv_grip_controller import PressureVisionGripRuntime
+
+    return PressureVisionGripRuntime(
+        _BaselineThenPress(),
+        initial_gripper=50.0,
+        middle_gripper=50.0,
+        pv_mapping="carton_span",
+        pressure_apply=True,
+    )
+
+
+def _drive(runtime, frames=12):
+    import numpy as np
+
+    command = 50.0
+    for tick in range(frames):
+        command = runtime.update(
+            base_gripper=20.0,
+            landmarks=np.zeros((21, 3)),
+            pinch=0.03,
+            enabled=True,
+            current_command=command,
+            observed_at_s=tick * 0.1,
+        ).actual_gripper
+    return command
+
+
+def test_a_frame_before_the_first_decision_has_nothing_to_report():
+    """Inventing a row would put a fabricated baseline into the training data."""
+    from pressurevision_integration.pv_shadow_telemetry import pv_shadow_sample
+
+    assert pv_shadow_sample(
+        _runtime(), control_observed_at_s=1.0, state="MOVING", pinch=0.03
+    ) is None
+
+
+def test_the_sample_carries_the_runtime_s_decision_and_lock_state():
+    from pressurevision_integration.pv_shadow_telemetry import pv_shadow_sample
+
+    runtime = _runtime()
+    command = _drive(runtime)
+    sample = pv_shadow_sample(
+        runtime, control_observed_at_s=1.2, state="MOVING", pinch=0.03
+    )
+
+    assert sample.actual_gripper_pos == pytest.approx(command)
+    assert sample.base_gripper_pos == pytest.approx(20.0)
+    assert sample.pressure_mode == "pv_carton_span_apply"
+    assert sample.baseline_ready is True
+    assert sample.fallback_used is False
+    assert sample.pv_adjustment_state is not None
+
+
+def test_the_assembled_sample_writes_a_complete_v7_row(tmp_path: Path):
+    """The end the evidence actually depends on: runtime state in, v7 row out."""
+    from pressurevision_integration.pv_shadow_telemetry import pv_shadow_sample
+
+    runtime = _runtime()
+    _drive(runtime)
+    sample = pv_shadow_sample(
+        runtime, control_observed_at_s=1.2, state="MOVING", pinch=0.03
+    )
+    row, fieldnames = _row(tmp_path, sample, motor_telemetry=None, name="assembled.csv")
+
+    assert fieldnames == CONTROL_SHADOW_FIELDS + PV_SHADOW_FIELDS
+    assert row["schema_version"] == "7"
+    assert row["pressure_mode"] == "pv_carton_span_apply"
+    assert row["pv_sequence"] != ""
