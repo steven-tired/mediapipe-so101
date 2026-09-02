@@ -29,7 +29,12 @@ from lerobot.robots.so_follower.robot_kinematic_processor import (
     InverseKinematicsEEToJoints,
 )
 
-from .ee_control import ee_action_from_hand, gripper_pos_from_pinch, joint_center
+from .ee_control import (
+    ee_action_from_hand,
+    gripper_pos_from_pinch,  # noqa: F401  (re-exported for existing callers)
+    joint_center,
+    raw_grip_from_pinch,
+)
 
 _THUMB_TIP = 4
 _INDEX_TIP = 8
@@ -46,6 +51,9 @@ MAX_EE_STEP_M = 0.10  # per-frame EE jump cap (slew-limited, not dropped)
 SMOOTHING_ALPHA = 0.3            # body-joint EMA (lower = smoother)
 EE_ORI_WEIGHT = 0.05             # IK orientation weight (0.01 default ignores orientation)
 MIDDLE_WRIST_DOWN_DEG = 90.0     # clutch/ready pose pitches wrist down so the gripper points down
+# SO-101 is 5-DOF: every degree of tool roll is spent out of the budget that holds the
+# gripper down. Opting in past this range trades the down-pose for roll authority.
+MAX_WRIST_ROLL_RANGE_DEG = 45.0
 
 # --- Gripper strength (0 = fully closed/clamped, 100 = open) ---
 # ASYMMETRIC EMA: close fast & firm, open slow. The slow-open is what stops the claw loosening when
@@ -58,10 +66,13 @@ MIDDLE_WRIST_DOWN_DEG = 90.0     # clutch/ready pose pitches wrist down so the g
 from .grip.contract import GripInput
 from .grip.mediapipe import (  # noqa: F401  (re-exported for existing callers)
     GRIP_CLOSE_ALPHA,
+    GRIP_MODES,
     GRIP_OPEN_ALPHA,
     GRIP_OVERDRIVE,
     MediaPipeGripperController,
 )
+
+GRIP_MAPS = ("overdrive", "span")
 
 
 @dataclass
@@ -82,6 +93,23 @@ class FixedEEOrientation(RobotActionProcessorStep):
 
     def transform_features(self, features):
         return features
+
+
+def bounded_wrist_roll_delta(quaternion, reference_roll, range_deg, gain=1.0) -> float:
+    """Relative hand roll, wrapped at pi and bounded about the latched pose.
+
+    The wrap matters: a hand held near +-180 deg crosses the branch cut on its
+    own, and an unwrapped difference would read that as a full turn.
+    """
+    current_roll = float(
+        Rotation.from_quat(np.asarray(quaternion, dtype=float)).as_euler("xyz")[0]
+    )
+    delta = float(gain) * float(np.arctan2(
+        np.sin(current_roll - reference_roll),
+        np.cos(current_roll - reference_roll),
+    ))
+    limit = float(np.deg2rad(range_deg))
+    return float(np.clip(delta, -limit, limit))
 
 
 @dataclass
@@ -116,7 +144,41 @@ class WebcamEEController:
         joints, state = ctl.step(wrist, landmarks)   # state in {MIDDLE, MOVING, HOLD}
     """
 
-    def __init__(self, robot, kin, cfg, use_oak: bool, gripper=None):
+    def __init__(
+        self,
+        robot,
+        kin,
+        cfg,
+        use_oak: bool,
+        gripper=None,
+        *,
+        grip_mode: str = "tracked",
+        grip_map: str = "overdrive",
+        wrist_roll_range_deg: float = 0.0,
+        wrist_roll_gain: float = 1.0,
+    ):
+        if grip_mode not in GRIP_MODES:
+            raise ValueError(f"unknown grip_mode {grip_mode!r}; expected one of {GRIP_MODES}")
+        if grip_mode != "tracked" and gripper is not None:
+            # grip_mode configures the default MediaPipe gripper. Silently
+            # ignoring it on an injected one is exactly the class of bug this
+            # constructor is supposed to catch.
+            raise ValueError("grip_mode applies to the default gripper; an injected gripper owns its own mode")
+        # "overdrive" is the validated map and stays the default: the recorded
+        # datasets and the trained policies assume it, so changing it silently
+        # would put recording and deploy on a different action distribution.
+        if grip_map not in GRIP_MAPS:
+            raise ValueError(f"unknown grip_map {grip_map!r}; expected one of {GRIP_MAPS}")
+        self.grip_map = grip_map
+        # Span mode carries no overdrive -- narrowing the range is what replaces
+        # it, and applying both would reintroduce the clipped dead zone.
+        self.grip_overdrive = 0.0 if grip_map == "span" else GRIP_OVERDRIVE
+        self.wrist_roll_range_deg = float(wrist_roll_range_deg)
+        if not 0.0 <= self.wrist_roll_range_deg <= MAX_WRIST_ROLL_RANGE_DEG:
+            raise ValueError(f"wrist_roll_range_deg must be within 0..{MAX_WRIST_ROLL_RANGE_DEG:g}")
+        self.wrist_roll_gain = float(wrist_roll_gain)
+        if not 0.0 < self.wrist_roll_gain <= 4.0:
+            raise ValueError("wrist_roll_gain must be within (0, 4]")
         self.kin = kin
         self.cfg = cfg
         self.motors = list(robot.bus.motors.keys())
@@ -143,23 +205,52 @@ class WebcamEEController:
 
         self.pipeline = None
         self.ref = None
+        self.roll_ref = None
         self.prev_enabled = False
         self.smoothed = None
-        self.gripper = gripper or MediaPipeGripperController()
+        self.gripper = gripper or MediaPipeGripperController(
+            overdrive=self.grip_overdrive, grip_mode=grip_mode
+        )
         self.cmd_state = dict(self.middle_pose)
+
+    # The grip smoothing state lives behind the gripper contract now. These
+    # forward to it so the controller stays the single place callers read
+    # control state from.
+    @property
+    def grip_mode(self) -> str:
+        return getattr(self.gripper, "grip_mode", "tracked")
+
+    @property
+    def grip_smoothed(self):
+        return getattr(self.gripper, "current_command", None)
+
+    @property
+    def grip_latched(self) -> bool:
+        return bool(getattr(self.gripper, "latched", False))
+
+    @property
+    def grip_open_frames(self) -> int:
+        return int(getattr(self.gripper, "open_frames", 0))
 
     def build(self, ee_centre):
         """Build the EE->joints pipeline with a workspace box centred on the ready EE pose."""
         ee_min = (np.asarray(ee_centre, float) - WORKSPACE_HALF_BOX).tolist()
         ee_min[2] = max(ee_min[2], Z_FLOOR_M)            # never below the table
         ee_bounds = {"min": ee_min, "max": (np.asarray(ee_centre, float) + WORKSPACE_HALF_BOX).tolist()}
+        # Roll is opt-in and mutually exclusive with the fixed orientation:
+        # FixedEEOrientation overwrites the whole rotvec every frame, so leaving
+        # it in would silently discard the roll delta rather than bound it.
+        steps = [
+            EEReferenceAndDelta(kinematics=self.kin,
+                                end_effector_step_sizes={"x": self.fwd_scale, "y": EE_LAT_SCALE, "z": EE_UP_SCALE},
+                                motor_names=self.motors, use_latched_reference=True),
+            SlewLimitedEEBounds(end_effector_bounds=ee_bounds, max_ee_step_m=MAX_EE_STEP_M),
+        ]
+        if self.wrist_roll_range_deg <= 0.0:
+            steps.append(FixedEEOrientation(rotvec=tuple(self.r_down)))
         self.pipeline = RobotProcessorPipeline(
             steps=[
-                EEReferenceAndDelta(kinematics=self.kin,
-                                    end_effector_step_sizes={"x": self.fwd_scale, "y": EE_LAT_SCALE, "z": EE_UP_SCALE},
-                                    motor_names=self.motors, use_latched_reference=True),
-                SlewLimitedEEBounds(end_effector_bounds=ee_bounds, max_ee_step_m=MAX_EE_STEP_M),
-                FixedEEOrientation(rotvec=tuple(self.r_down)),
+                *steps,
                 GripperVelocityToJoint(speed_factor=20.0),
                 InverseKinematicsEEToJoints(kinematics=self.kin, motor_names=self.motors,
                                             initial_guess_current_joints=True),
@@ -178,6 +269,7 @@ class WebcamEEController:
         self.gripper.reset()
         self.smoothed = None
         self.ref = None
+        self.roll_ref = None
         self.prev_enabled = False
         if self.pipeline is not None:
             self.pipeline.reset()
@@ -195,16 +287,35 @@ class WebcamEEController:
 
         if enabled and (not self.prev_enabled or self.ref is None):
             self.ref = np.asarray(wrist.position, dtype=float).copy()
+            if self.wrist_roll_range_deg > 0.0:
+                self.roll_ref = float(
+                    Rotation.from_quat(
+                        np.asarray(wrist.quaternion, dtype=float)
+                    ).as_euler("xyz")[0]
+                )
         displacement = (np.asarray(wrist.position, dtype=float) - self.ref) if enabled else np.zeros(3)
         self.prev_enabled = enabled
 
         lm = np.asarray(landmarks.landmarks, dtype=float)
         pinch = float(np.linalg.norm(lm[_THUMB_TIP] - lm[_INDEX_TIP]))
-        ee_act = ee_action_from_hand(displacement, pinch, enabled, self.cfg)
+        roll_delta = (
+            bounded_wrist_roll_delta(
+                wrist.quaternion,
+                self.roll_ref,
+                self.wrist_roll_range_deg,
+                self.wrist_roll_gain,
+            )
+            if enabled and self.roll_ref is not None
+            else 0.0
+        )
+        ee_act = ee_action_from_hand(
+            displacement, pinch, enabled, self.cfg, roll_delta=roll_delta
+        )
 
         if clutch:
             self.pipeline.reset()
             self.ref = None
+            self.roll_ref = None
             self.smoothed = None
             self.gripper.reset()
             self.cmd_state = dict(self.middle_pose)
@@ -219,13 +330,21 @@ class WebcamEEController:
                 joint_act[f"{m}.pos"] = self.smoothed[m]
             # Overdrive and the asymmetric close/open smoothing live in the gripper
             # controller now. severity is the pinch mapping normalised: 1 = grip hardest.
-            severity = 1.0 - gripper_pos_from_pinch(pinch, self.cfg) / 100.0
+            severity = 1.0 - raw_grip_from_pinch(pinch, self.cfg, grip_map=self.grip_map) / 100.0
+            observed_at_s = wrist.observed_at_s if hasattr(wrist, "observed_at_s") else 0.0
+            # A gripper that reads its own sensor gets the frame here. This hook
+            # is the whole reason the core never has to import an integration
+            # package: it is satisfied by duck typing, not by an import.
+            if hasattr(self.gripper, "observe_frame"):
+                self.gripper.observe_frame(
+                    landmarks, pinch=pinch, enabled=enabled, observed_at_s=observed_at_s
+                )
             grip_in = GripInput(
                 grasp_active=True,
                 explicit_release=False,
                 severity=severity,
                 valid=True,
-                observed_at_s=wrist.observed_at_s if hasattr(wrist, "observed_at_s") else 0.0,
+                observed_at_s=observed_at_s,
             )
             joint_act["gripper.pos"] = self.gripper.step(
                 grip_in, actual_pos=self.cmd_state.get("gripper.pos", 50.0)
