@@ -5,9 +5,17 @@ into this repository. Run 2026-09-01.
 
 Evidence is reported at three levels and never mixed: **software** (tests and
 static checks), **locked inference** (offline evaluation), and **physical robot**
-(observed closed-loop behaviour). This audit covers software and physical.
+(observed closed-loop behaviour).
+
+The first two sections were run on 2026-09-01 on the development machine and
+cover software and physical. The **Phase 2** section below was run the same day
+but remotely, and covers software only.
 
 ## Software gate
+
+Numbers as of the migration run. The Phase 2 section below carries the current
+ones; where the two disagree, this table is the historical record, not a claim
+about the repository today.
 
 | Check | Result |
 | --- | --- |
@@ -129,19 +137,131 @@ autonomously. `deploy_so101_ee.py` now refuses a camera-mismatched policy before
 Each guard was mutation-tested: the defect was reintroduced and the guard
 confirmed to fail, so none of them is vacuously green.
 
+## Phase 2 — the PressureVision force-control runtime
+
+Run 2026-09-01, **remotely over SSH: no robot, no cameras, no physical evidence
+of any kind.** Everything below is the software level only.
+
+### Why this phase existed
+
+The migration above left a reproducibility gap. This repository held the
+consumer (`research/train_grip_residual_head.py`), the data (`local/evidence/`)
+and the documentation (`training/TRAINING_HANDOFF.md`) — but not the code that
+produces the teacher labels those episodes carry. The PV grip runtime lived
+only in a worktree of the pre-split checkout.
+
+That code is now here: the adjustment lock, the range and relative mappers, the
+proposal state machine, the closure limiter, the schema-v7 telemetry, the PV
+recorder and the grip-supervised deploy program.
+
+### Software gate
+
+Numbers as of the migration run. The Phase 2 section below carries the current
+ones; where the two disagree, this table is the historical record, not a claim
+about the repository today.
+
+| Check | Result |
+| --- | --- |
+| Full suite | **745 passed**, 0 failed |
+| `packages/webcam_input` | 27 |
+| `packages/so101_teleop` | 383 |
+| `packages/policy_grip_aux` | 5 |
+| `integrations/pressurevision` | 330 |
+| Tracked files | 192 |
+| Largest tracked file | 72.8 KB (`training/TRAINING_HANDOFF.md`) |
+| `git ls-files local` | 0 |
+| `git status --short` | empty |
+| Core imports `pressurevision_integration` | only `grip/compose.py`, lazily |
+| Tracked imports of `ir_force` | 0 |
+| Tracked developer paths in published Python | 0 |
+| Remote | `steven-tired/mediapipe-so101`, **private** (anonymous fetch 404) |
+
+`scripts/smoke_env.sh` does carry absolute paths. It is this machine's
+environment file rather than published code, and the boundary test scans
+Python under `packages/`, `integrations/` and `research/`. Stated here so the
+"0 developer paths" row is not read more broadly than it is meant.
+
+### What this phase changed in behaviour — all software evidence only
+
+Four decisions changed how the system behaves. None has been observed on
+hardware. Each is listed with what would confirm or refute it.
+
+| # | Change | Why | What would test it |
+| --- | --- | --- | --- |
+| 1 | Losing the hand (HOLD) or clutching disarms PV; it must earn a fresh baseline before driving again | A hand that leaves the frame may have put the object down or moved on the pad, and the sensor cannot tell. Resuming from the old zero means commanding force against a scene it can no longer see. `local/evidence/` was recorded under this behaviour, so reproducing those labels needs the same control law | Park and resume mid-grasp; the command must follow the pinch path until a baseline lands, not jump back to the previous PV target |
+| 2 | A dead sender latches and holds, rather than falling back to the pinch path | The pre-split controller reverted to pinch control mid-grasp. Swapping control laws while holding an object is not something a bench test catches | Kill the sender during a grasp; the gripper must hold its position, not re-track the hand |
+| 3 | The middle-pose gesture is configurable; the PV recorder uses the right-hand V-sign | PressureVision occupies the left hand — it is pressing the pad — so a left fist is not a gesture the operator can make. The default stays the fist for the non-PV path, which is what the 100-episode dataset was recorded through | Both gestures on the arm; the V-sign's 0.4 s dwell should not fire on a hand passing through the pose |
+| 4 | The gripper is chosen at construction; there is no "legacy" decision record when PV is absent | A consequence of moving PV out of the controller. It removes the pre-split fallback in which a closed sender silently returned control to the pinch path | Covered by 2 |
+
+Two migration-only changes are also unverified on hardware: the PV wrapper
+hides the GPU per-invocation rather than for the whole script (so the sender
+keeps the GPU it needs), and `deploy_so101_grip_ee.py` defaults to the Hub copy
+of the ACT 80k final instead of a local checkpoint path.
+
+### What was deliberately not migrated
+
+The IR-shadow recording path (`record_so101_ee` under `SO101_IR_PRESSURE`, and
+its 21 tests) exists in neither repository. It was left behind by the phase-1
+split and will not be recovered: IR recording is not planned. Recorded IR
+evidence is unaffected; only the ability to record more of it is gone.
+
 ## Open gates
 
 - **OAK-D path unverified.** `--oak` cannot work against depthai 2.32; it needs
   depthai v3 or a rewritten `oak_camera.py`. Monocular is the default and is what
   the physical gate above exercised.
 - **DDIM deployment rate unverified here.** The ~9 Hz figure comes from diffusion
-  policies; this audit ran ACT.
-- **PressureVision mode unverified on hardware.** `--gripper-mode pressurevision`
-  passes its software tests, but no physical run has exercised the PV sender path.
+  policies; the physical gate above ran ACT.
+- **The PressureVision force-control path has never run connected to a robot.**
+  Restated after phase 2, because it is now a larger claim than it was: the
+  adjustment lock, the range mapper, the proposal machine and the closure
+  limiter are all here and all green in software, and phase 2 additionally
+  changed four behaviours (see the table above) on software evidence alone. The
+  gap between "both suites green" and "PV force control works on the arm" is
+  this gate, and the physical gate above already showed what that gap can hide:
+  five defects survived 400+ passing tests.
 - **PressureVision comparison study unfinished.** See `CLAIMS_AND_GATES.md`.
+
+### Closing the PressureVision gate
+
+The procedure, so it can be run without re-deriving it. Preconditions: SO-101 on
+`usb-1a86_USB_Single_Serial_5B14110850`, the Creative Live! Cam workspace
+camera, `./scripts/view_camera.sh --profile dp100` for alignment, and
+`SO101_PV_PYTHON` pointing at the PressureVision environment. **Never substitute
+`python -m` for the wrappers** — defect #1 above is exactly that mistake.
+
+1. **PV teleoperation.** `./scripts/run_record_pv_ee.sh` with `PV_LEVELS` set to
+   a freshly fitted `levels.json`, gripping a paper carton (the `carton_span`
+   mapping is calibrated for it: zero=32, one=20). Four state transitions to
+   observe, not "it did not crash":
+   - the command follows PV while in contact and stays inside 20..32;
+   - contact lost for ≥1.0 s latches — `adjustment_state` goes
+     `adjusting → temporary_hold → locked`;
+   - a single flickering re-contact frame does **not** unlatch; ≥0.15 s does;
+   - opening the right hand releases the grip **with the PV sender killed**.
+     This last one is the hardware evidence for the safety contract, and the
+     software test for it uses a fake sender.
+2. **PV recording.** Read the episode back: schema v7 fields present
+   (`grip_intervention`, the teacher label, `mapping_contract`), and the teacher
+   values must **vary**. A constant column means the adjustment lock never
+   reached `locked`, and the residual head would be learning noise.
+3. **DP deployment.** `./scripts/run_deploy_ee.sh --duration 30` with **DP100,
+   not ACT**, which also settles the DDIM gate: ~270 steps in 30 s is ~9 Hz.
+
+Record the result here in the format above, per step, and **write FAIL and
+leave the gate open if any step fails.** Partial success is not a pass.
 
 ## Publication
 
-This audit covers the repository's readiness. Creating a GitHub repository, adding
-a remote, pushing, or uploading datasets is a separate action requiring explicit
-authorization, and none of it has been performed.
+This audit covers the repository's readiness, not its publication.
+
+Since the migration run, this repository has been pushed to a **private** GitHub
+repository (`steven-tired/mediapipe-so101`) with the owner's authorization. It
+was verified private by anonymous fetch: unauthenticated HTTP returns 404 and an
+unauthenticated `git ls-remote` demands credentials. The private counterpart
+`steven-tired/ir-camera-force` is likewise private.
+
+Making either repository **public**, or uploading datasets or checkpoints,
+remains a separate action requiring explicit authorization, and none of it has
+been performed. The open gates above are capability gaps, not a publication
+checklist: closing them does not by itself authorize publication.
