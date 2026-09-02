@@ -182,15 +182,21 @@ class BodyStallDetector:
         spread = 0.0 if self._reference is None else float(
             np.max(np.abs(command - self._reference))
         )
-        if self._reference is None or spread > self.config.motion_epsilon:
+        moved = self._reference is None or spread > self.config.motion_epsilon
+        if moved:
             self._reference = command
             self._still_since_s = float(t)
-            spread = 0.0
         still_for = float(t) - self._still_since_s
         return {
             "stalled": still_for >= self.config.window_s,
             "still_for_s": still_for,
+            # The deviation that was measured, whether or not it reset the
+            # reference. Zeroing it on reset made the log say "spread 0.0" on
+            # every moving cycle as well as every still one, so the column
+            # could not distinguish a stall from a trajectory and was useless
+            # for choosing motion_epsilon -- the one thing it is logged for.
             "command_spread": spread,
+            "reference_reset": bool(moved),
         }
 
 

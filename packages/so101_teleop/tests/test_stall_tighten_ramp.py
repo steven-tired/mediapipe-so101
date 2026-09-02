@@ -175,3 +175,19 @@ def test_the_deepest_target_is_the_squeeze_the_carton_took():
     _run(ramp, seconds=8.0, body_at=lambda t: STALLED)
     assert ramp.deepest_target == pytest.approx(26.0)
     assert ramp.reached_floor is True
+
+
+def test_the_logged_spread_is_what_was_measured_not_zero_on_reset():
+    """The column exists to choose motion_epsilon, so it must show the motion.
+
+    Zeroing it whenever it exceeded the threshold made every moving cycle log
+    the same 0.0 as every still one.
+    """
+    detector = BodyStallDetector(StallConfig(window_s=2.0, motion_epsilon=0.05))
+    detector.update(t=0.0, body_command=STALLED)
+    moving = detector.update(t=0.1, body_command=[-19.32 + 3.0, 35.82])
+    assert moving["command_spread"] == pytest.approx(3.0)
+    assert moving["reference_reset"] is True
+    still = detector.update(t=0.2, body_command=[-19.32 + 3.0, 35.82])
+    assert still["command_spread"] == 0.0
+    assert still["reference_reset"] is False
