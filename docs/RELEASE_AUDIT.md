@@ -224,29 +224,44 @@ evidence is unaffected; only the ability to record more of it is gone.
 
 ## Open gates
 
-- **OAK-D path unverified.** `--oak` cannot work against depthai 2.32; it needs
-  depthai v3 or a rewritten `oak_camera.py`. Monocular is the default and is what
-  the physical gate above exercised.
+- ~~**OAK-D path unverified.**~~ **Closed 2026-09-02.** `oak_camera.py` now
+  speaks both pipeline APIs and picks by installed version, so the pin is no
+  longer the constraint. Both were run against the hardware. **Use v2 (2.32).**
+  On depthai 3.7.1 the device firmware crashed on *every* pipeline start —
+  `RTEMS_FATAL_SOURCE_INVALID_HEAP_FREE` in `PlgSrcMipi`, "Start Source: Invalid
+  config steps" — three runs, three crash dumps, with the host silently
+  reconnecting afterwards, which is why 15 s of clean frames and a crash dump
+  coexist. 2.32 produced no dump. The PV recorder defaults to OAK, so this was
+  not a side path: PV recording could not start at all under 2.32 before this.
 - **DDIM deployment rate unverified here.** The ~9 Hz figure comes from diffusion
   policies; the physical gate above ran ACT.
-- **The PressureVision force-control path has never run connected to a robot.**
-  Restated after phase 2, because it is now a larger claim than it was: the
-  adjustment lock, the range mapper, the proposal machine and the closure
-  limiter are all here and all green in software, and phase 2 additionally
-  changed four behaviours (see the table above) on software evidence alone. The
-  gap between "both suites green" and "PV force control works on the arm" is
-  this gate, and the physical gate above already showed what that gap can hide:
-  five defects survived 400+ passing tests.
+- **The PressureVision force-control gate is PARTLY closed — it stays open.**
+  Run on hardware 2026-09-02; see "PressureVision gate — 2026-09-02" below.
+  Steps 1a, 1b and 2 pass with evidence. Step 1c has only partial evidence,
+  step 1d **fails**, and step 3 was not run. Per the rule at the end of the
+  procedure, partial success is not a pass.
 - **PressureVision comparison study unfinished.** See `CLAIMS_AND_GATES.md`.
 
 ### Closing the PressureVision gate
 
-The procedure, so it can be run without re-deriving it. Preconditions: SO-101 on
-`usb-1a86_USB_Single_Serial_5B14110850`, the Creative Live! Cam workspace
-camera, `./scripts/view_camera.sh --profile dp100` for alignment, a fitted
-`levels.json` (`./scripts/run_pv_pad.sh aim | capture | fit`), and
-`SO101_PV_PYTHON` pointing at the PressureVision environment. **Never substitute
-`python -m` for the wrappers** — defect #1 above is exactly that mistake.
+The procedure, so it can be run without re-deriving it.
+
+Preconditions: SO-101 on `usb-1a86_USB_Single_Serial_5B14110850`, the C270 pad
+camera on `/dev/video2`, the Creative front camera, the Etron side camera, and
+an OAK-D on **depthai 2.32** (see the OAK entry under Open gates). `source
+scripts/smoke_env.sh` sets the four PV variables — `SO101_PV_PYTHON`,
+`SO101_PV_REPO` (the released PressureVision checkout holding `config/` and
+`data/model/`), `PV_LEVELS` and `PV_SESSION_DIR`. **Never substitute `python -m`
+for the wrappers** — defect #1 of the first physical gate is exactly that
+mistake, and a missing `SO101_PV_REPO` is the same family.
+
+A full refit is usually unnecessary: `./scripts/run_pv_pad.sh rematch <session>`
+puts the camera back where an existing `levels.json` was fitted, and the
+sender's `--require-scene-match` refuses to stream if it did not work. Refit
+(`aim | capture | fit`) only when rematch cannot converge. Copy an existing
+`levels.json` with `cp -p`: the freshness gate reads file **mtime**, so a plain
+copy makes a stale fit look new, and raising `PV_MAX_LEVEL_AGE_MINUTES` should
+be a visible decision rather than a side effect of copying.
 
 1. **PV teleoperation.** `./scripts/run_record_pv_ee.sh` with `PV_LEVELS` set to
    a freshly fitted `levels.json`, gripping a paper carton (the `carton_span`
@@ -268,6 +283,136 @@ camera, `./scripts/view_camera.sh --profile dp100` for alignment, a fitted
 
 Record the result here in the format above, per step, and **write FAIL and
 leave the gate open if any step fails.** Partial success is not a pass.
+
+## PressureVision gate — 2026-09-02
+
+Run from this repository with the SO-101, the C270 pad rig, the Creative front
+camera, the Etron side camera and an OAK-D on depthai 2.32. The calibration was
+**not** refitted: session 26's `levels.json` (2026-08-26) was copied into
+`local/pv_sessions/` with `cp -p`, and `run_pv_pad.sh rematch 26` put the camera
+back — measured drift afterwards 2.4 px and 2.8 points of area, against limits
+of 40 px and 6.0. The freshness gate was raised deliberately for the run
+(`PV_MAX_LEVEL_AGE_MINUTES`); mtime was preserved precisely so that override had
+to be explicit, because the gate reads file mtime and an ordinary `cp` would
+have made a week-old fit look minutes old. The scene fingerprint is the guard
+doing the real work here.
+
+### 1a. Command follows PV, inside 20..32 — PASS
+
+`relative_closure` 0 → 11.98 against a span of 12, `range_live_target`
+20.02 → 32.0, and `proposed_gripper_pos` equal to `actual_gripper_pos`
+throughout, never outside the span.
+
+### 1b. `adjusting → temporary_hold → locked` — PASS
+
+`pv_adjustment_state`: adjusting 146, temporary_hold 28, locked 25.
+`release_elapsed_s` reached 1.003 s against its 1.0 s threshold. Anchors latched
+at q=29.16 and q=23.39, and in a later run at q=20.84 then q=31.43 — a deeper
+grip after a resume, which is the behaviour the lock exists for.
+
+### 1c. Flicker does not unlatch, ≥0.15 s does — PARTIAL
+
+One `recontact_started` event and two non-null `recontact_since_s` frames were
+observed. That shows the debounce ran; it does **not** separately demonstrate
+both halves — that a single flickering frame is rejected *and* that ≥0.15 s is
+accepted. Deliberately not recorded as a pass.
+
+### 1d. Right hand releases the grip with the sender dead — FAIL
+
+Killing `serve_pad_pressure.py` mid-grip and opening the right hand did **not**
+release. Two distinct causes, both still true of the design:
+
+* **The control loop stops.** `invalidate_episode()` sets `stop_recording` and
+  `exit_early` together, so a latched PV fault ends the whole session on the
+  next frame — `fault_latched` is True on exactly one row (tick 323) and the
+  loop is gone. Nothing was left running to notice a hand opening. The recorded
+  `base_gripper_pos` over the final 25 frames is 20–26, nowhere near
+  `GRIP_LATCH_EXIT = 65`, because those frames precede the kill.
+* **`explicit_release` has no producer.** It is hardcoded `False` at both
+  `GripInput` sites in `ee_controller.py`, and nothing in the repo sets it true,
+  so its three consumers are dead code. `pv_grip_adapter.py`'s comment —
+  "Explicit release is MediaPipe's alone. It must work with the PV sender dead,
+  so it never consults the runtime" — describes a mechanism that does not exist.
+  Release today depends on the range mapper's grasp latch, which runs *inside*
+  the PV runtime: exactly the dependency the contract forbids.
+
+**What was fixed instead, and what it is not.** The session now opens the
+gripper before the bus closes (`release_gripper_before_disconnect`), on every
+exit path including a crashing one — confirmed on hardware. Torque-off alone
+does not do this: `disable_torque_on_disconnect` is already True, but gear
+friction keeps the jaw closed on the object. That is a real improvement and it
+covers ESC, PV fault and exception alike. **It is not this gate.** This gate
+asks for release *while running*, with PV dead, and that remains unreachable.
+
+An earlier attempt to keep the loop alive after a fault for a 30 s "release
+window" was written and then reverted: it means driving the arm on sensor state
+already judged untrustworthy, and stopping — which drops torque — is the better
+failure mode. Recorded here so it is not re-proposed as an obvious fix.
+
+### 2. Recording readback — PASS
+
+Episode `success_no_slip`, promoted, 55 frames. `observation.grip_intent_teacher`
+carries 15 distinct values over 0..0.972 — **not** a constant column, so the lock
+did reach `locked`. `meta/pv_mapping_contract.json` is present with the full
+carton_span contract. Provenance is live: `grip_intent_sequence` 303..464 (55
+distinct), `grip_intent_frame_age_s` 0.021–0.070 s, and the three timestamps
+float64 spanning the episode.
+
+**Read those three timestamps from the parquet, not through `ds[i]`.** The
+tensor path converts to float32, and a unix timestamp needs more precision than
+float32 carries, so they read back collapsed to a single value ~128 s wide.
+`frame_age_s` is the one to use from the tensor path.
+
+### 3. DP deployment / DDIM rate — NOT RUN
+
+## Defects found by this gate
+
+Ten, on top of the five the first physical gate found. All have regression
+guards, and every guard was mutation-tested — the defect reintroduced and the
+guard confirmed to fail.
+
+| # | Defect | Shape |
+| --- | --- | --- |
+| 1 | No PressureVision checkout: the migrated default became `None` and nothing replaced it | absent default |
+| 2 | `WebcamSample`, `latest_sample()`, `image_xy`, `depth_m`, `sample_landmark_depths` all missing | thin type taken from the wrong branch |
+| 3 | `LatestFrameSource` filed on the private side, imported from the public side | one-way dependency violated |
+| 4 | `WebcamSource.stop()` not idempotent — a clean ESC ended in a traceback | double close |
+| 5 | `oak_camera.py` v3-only against a 2.32 runtime | API pin |
+| 6 | **Control frame timestamp constant 0.0** | `hasattr(...) else 0.0` |
+| 7 | `so101_diag ids` could not report an absent motor | `ping()` returns None, only exceptions counted |
+| 8 | Five of seven PV dataset columns constant 0 | four wrong field names, `getattr(..., None)` |
+| 9 | `mapping_contract` never reached the dataset | written only to the evidence manifest |
+| 10 | The API guard skipped the PV tools directory and knew only the controller | guard scope |
+
+**Six of these share one shape**: a defensive construct — `hasattr`/`getattr`
+fallbacks, a test double built to whatever the code asked for, counting only
+exceptions, a `callable()` check — turning something that should have raised
+into a silently wrong value. #6 is the clearest: a missing attribute became a
+frozen clock, which froze the PV low-pass *and* every duration the adjustment
+lock measures. One dead value produced every PV symptom, and 787 passing tests
+saw none of it.
+
+#7 misled this audit in the moment: its false "missed 0/10 ok" was used to claim
+a motor was answering while `robot.connect()` was failing on that same motor.
+
+An eleventh defect was introduced *during* this session and fixed here: tightening
+#8 from `getattr` to named access removed the tolerance for `reading is None`,
+which is a real state before the first PV packet, and crashed a recording. The
+lesson runs both ways — the point is to distinguish a legitimate absent state
+from a misspelled field, not to prefer one style of access.
+
+## Environment note
+
+The LeRobot venv carried three editable installs pointing into the pre-split
+`webcam-input/` tree. Because setuptools' `_EditableFinder` sits after
+`PathFinder` on `sys.meta_path`, they were a **silent fallback**: any submodule
+this repo lacked was served from the old tree instead of raising. "Imports
+succeed" and "the suite passes" therefore said nothing about whether this
+repository is complete. They were replaced with editable installs of this repo's
+own packages on 2026-09-02, and `webcam-input/` was retired;
+`test_no_module_comes_from_outside_this_repo.py` now asserts completeness
+statically, which is the only form of the question that survives the old tree
+going away.
 
 ## Publication
 
