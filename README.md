@@ -87,36 +87,125 @@ The PV sender is a separate process on purpose: it needs its own environment
 (torch + segmentation-models-pytorch), and the teleop must keep working when it
 is not running.
 
-## Requirements
+## Setup
 
-The repository carries no machine-specific paths — every one lives in
-`scripts/smoke_env.sh`, and each missing piece fails with a message naming the
-variable to set. It is independent of the pre-split `webcam-input` tree, but it
-is **not self-contained**; it needs, from outside:
+Python **3.12** (the packages pin `>=3.12,<3.13`). These steps use
+[uv](https://docs.astral.sh/uv/); plain `pip` works with the same arguments.
 
-| What | Variable | Needed by |
-| --- | --- | --- |
-| A Python 3.12 env with LeRobot installed | `SO101_PYTHON` | everything |
-| `vr-dex-retargeting`'s `vector_retargeting` | `VR_DEX_RETARGETING_DIR` | hand tracking |
-| An SO-ARM100 checkout (URDF for IK) | `SO_ARM100_DIR` | arm control |
-| The released PressureVision checkout + weights | `SO101_PV_REPO` | PV only |
-| A torch env for the PV network | `SO101_PV_PYTHON` | PV only |
+### 1. LeRobot, from source
 
-Hardware: an SO-101 on a Feetech bus, a hand camera, and a workspace camera. The
-PV path additionally needs an overhead pad camera and a distinct side camera.
-
-**Use depthai 2.32 for the OAK path.** On 3.7.1 the device firmware crashes on
-every pipeline start; `oak_camera.py` supports both APIs so the pin is a choice,
-not a constraint.
-
-## Quickstart
+`packages/so101_teleop` pins `lerobot==0.5.2`. **PyPI does not have that
+version** — it is at 0.6.x — so LeRobot must come from a source checkout at a
+commit that declares 0.5.2. This repository is developed against `da92db8`.
 
 ```bash
-source scripts/smoke_env.sh        # or your own copy of it
-./scripts/view_camera.sh --profile dp100
-./scripts/run_arm_ee.sh            # keep the right hand visible for 3 s to arm
-./scripts/run_record_ee.sh         # SPACE saves the episode, ESC discards, R re-records
+git clone https://github.com/huggingface/lerobot
+git -C lerobot checkout da92db8
 ```
+
+### 2. The environment
+
+MediaPipe 0.10.21 declares `numpy<2` while LeRobot needs `numpy>=2`. They do
+coexist — this repository runs on numpy 2.2.6 and mediapipe 0.10.21 — so the
+declared pin is relaxed with an override rather than worked around:
+
+```bash
+uv venv --python 3.12 .venv
+echo 'numpy>=2.0,<2.3' > overrides.txt
+
+uv pip install --override overrides.txt \
+  "mediapipe==0.10.21" \
+  -e "./lerobot[feetech,dataset,placo-dep]" \
+  -e mediapipe-so101/packages/webcam_input \
+  -e mediapipe-so101/packages/so101_teleop \
+  -e mediapipe-so101/packages/policy_grip_aux
+```
+
+`feetech` is the servo bus, `dataset` the LeRobot dataset stack, `placo-dep` the
+IK solver. This resolves to numpy 2.2.6, mediapipe 0.10.21, placo 0.9.15,
+feetech-servo-sdk 1.0.0 and torch 2.11.0+cu128.
+
+For the OAK-D path only:
+
+```bash
+uv pip install "depthai==2.32.0.0"
+```
+
+**Use 2.32, not 3.x.** `oak_camera.py` speaks both pipeline APIs, but on 3.7.1
+the OAK firmware crashes on every pipeline start (`PlgSrcMipi`, "Start Source:
+Invalid config steps") and the host reconnects silently, so a run looks healthy
+and leaves a crash dump behind.
+
+### 3. Two checkouts this repo reads, and does not vendor
+
+```bash
+git clone https://github.com/wengmister/vr-dex-retargeting
+git clone https://github.com/TheRobotStudio/SO-ARM100
+```
+
+`vr-dex-retargeting` supplies `SingleHandDetector`, the MediaPipe → 21 landmarks
+→ MANO pipeline this repo reuses rather than reimplements. `SO-ARM100` supplies
+the URDF the IK solves against. Neither is copied in; both are named by
+environment variable, so nothing assumes what sits next to it on disk.
+
+### 4. Configure
+
+The repository contains **no machine-specific paths**. They all live in one
+file, `scripts/smoke_env.sh` — copy it and edit, or export these yourself:
+
+| Variable | Points at | Needed by |
+| --- | --- | --- |
+| `SO101_PYTHON` | the venv's `bin/python` | everything |
+| `VR_DEX_RETARGETING_DIR` | `<clone>/example/vector_retargeting` | hand tracking |
+| `SO_ARM100_DIR` | the SO-ARM100 checkout | arm control (URDF) |
+| `SO101_ARM_PORT` | the arm's `/dev/serial/by-id/...` | arm control |
+| `SO101_WORKSPACE_CAM` | the workspace camera's `/dev/v4l/by-id/...` | recording, deploy |
+| `SO101_LOCAL_DIR` etc. | where datasets and evidence go | recording |
+
+Every one of these fails with a message naming the variable if it is wrong or
+missing, so a misconfiguration surfaces at startup rather than mid-episode.
+
+Then calibrate the arm once with LeRobot's own tooling
+(`lerobot-find-port`, `lerobot-calibrate`), as for any SO-101.
+
+### 5. Check it
+
+```bash
+python -m pytest -q                    # 987 tests, no hardware needed
+./scripts/probe_oak.sh                 # only if you have an OAK-D
+./scripts/view_camera.sh --profile dp100
+./scripts/run_arm_ee.sh                # first motion; keep the e-stop in reach
+```
+
+**Always go through `scripts/`.** The wrappers put this checkout first on
+`PYTHONPATH` and select the right interpreter; `python -m` can silently resolve
+a different installed copy, which has already cost one debugging session here.
+
+### Optional: the PressureVision path
+
+Needs a second environment, because the network is torch + segmentation-models-pytorch
+and the teleop must keep working when the sender is not running.
+
+```bash
+git clone https://github.com/facebookresearch/PressureVision
+# fetch its released weights into data/model/paper_59.pt per its README
+uv venv --python 3.12 .venv-pv
+uv pip install --python .venv-pv/bin/python \
+  torch torchvision segmentation_models_pytorch opencv-contrib-python pyyaml timm
+
+export SO101_PV_REPO=$PWD/PressureVision      # holds config/ and data/model/
+export SO101_PV_PYTHON=$PWD/.venv-pv/bin/python
+```
+
+Then `./scripts/run_pv_pad.sh aim | capture | fit` to calibrate the pad rig, and
+`./scripts/run_record_pv_ee.sh` to record with PV supervision. The pad rig needs
+an overhead camera on the pad and a side camera distinct from the workspace one.
+
+### Hardware
+
+An SO-101 on a Feetech bus, a camera for the hand, and a workspace camera. The
+PV path adds an overhead pad camera and a distinct side camera. An OAK-D is
+optional and replaces the hand camera with metric stereo depth.
 
 ## Gripper modes
 
