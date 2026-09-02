@@ -56,6 +56,8 @@ from lerobot_teleoperator_so101_webcam.ee_control import joint_center
 from lerobot_teleoperator_so101_webcam.ee_controller import MIDDLE_WRIST_DOWN_DEG
 from lerobot_teleoperator_so101_webcam.grip.runtime import (
     GRIP_CONTEXTS,
+    LoosenRampConfig,
+    PairedBoundaryProtocol,
     StallConfig,
     StallTightenRamp,
     TightenRampConfig,
@@ -456,6 +458,62 @@ class GripInterventionController:
         cv2.destroyWindow(self.window_name)
 
 
+class PairedBoundaryOperator:
+    """Keyboard front end for the paired lift/slip collection.
+
+    Two keys, because the protocol has exactly two events the operator can see
+    and the machine cannot: the carton is stably lifted, and the carton has
+    dropped. Everything else -- the stall, the stall breaking, the ramps -- is
+    decided from the commands and the readback.
+    """
+
+    def __init__(self, protocol: PairedBoundaryProtocol):
+        self.protocol = protocol
+        self.stop = False
+        self.window_name = "Paired boundaries: l = lifted | d = dropped | q stop"
+
+    def start(self) -> None:
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.window_name, 760, 220)
+
+    def poll_input(self) -> None:
+        canvas = np.zeros((220, 760, 3), dtype=np.uint8)
+        phase = self.protocol.phase
+        prompt = {
+            "following": "ACT running; press l once the carton is STABLY LIFTED",
+            "loosening": "loosening until it drops; press d THE MOMENT it lets go",
+            "done": "done; both branches recorded",
+        }[phase]
+        lift = self.protocol.lift_boundary
+        slip = self.protocol.slip_boundary
+        for index, (text, colour) in enumerate((
+            (f"phase: {phase}", (0, 255, 0) if phase == "loosening" else (0, 200, 255)),
+            (prompt, (255, 255, 255)),
+            (
+                f"lift boundary: {'--' if lift is None else f'{lift:.2f}'}    "
+                f"slip boundary: {'--' if slip is None else f'{slip:.2f}'}",
+                (255, 255, 255),
+            ),
+            ("l = lifted | d = dropped | q stop", (180, 180, 180)),
+        )):
+            cv2.putText(canvas, text, (20, 45 + index * 45),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.62, colour, 2)
+        cv2.imshow(self.window_name, canvas)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("l"):
+            self.protocol.confirm_lift()
+            print("[paired] lift confirmed; loosening starts")
+        elif key == ord("d"):
+            self.protocol.mark_drop()
+            print("[paired] drop marked; loosening ends")
+        elif key in {ord("q"), 27}:
+            self.stop = True
+
+    def close(self) -> None:
+        self.stop = True
+        cv2.destroyWindow(self.window_name)
+
+
 class GripCandidateTrialController:
     """One-shot post-lift loosen trial; activation is an operator lift confirmation."""
 
@@ -821,6 +879,7 @@ class DeploymentEvidence:
         steps: int,
         commands_sent: int,
         error: str | None = None,
+        paired_boundaries: dict | None = None,
     ) -> None:
         if self._closed:
             return
@@ -836,6 +895,7 @@ class DeploymentEvidence:
                 "commands_sent": int(commands_sent),
                 "achieved_hz": 0.0 if elapsed_s <= 0.0 else float(steps / elapsed_s),
                 "error": error,
+                "paired_boundaries": paired_boundaries,
             }
         )
         self._write_manifest()
@@ -1015,6 +1075,17 @@ def main():
                     help="how long the body commands must hold still to count as a stall")
     ap.add_argument("--stall-epsilon", type=float, default=0.05,
                     help="body command deviation that still counts as holding still")
+    ap.add_argument("--paired-boundaries", action="store_true",
+                    help="collect a lift and a slip boundary within each grasp: tighten to "
+                         "break a stall, then loosen after the lift until the carton drops. "
+                         "Uses the stall-tighten settings for the tighten branch.")
+    ap.add_argument("--loosen-step", type=float, default=0.5,
+                    help="post-lift loosen step. 2026-09-02 measured the smallest resolvable "
+                         "loosen step at 0.5, against 2.0 to tighten.")
+    ap.add_argument("--loosen-interval-s", type=float, default=1.0,
+                    help="dwell between loosen steps; must exceed the jaw settle time")
+    ap.add_argument("--loosen-ceiling", type=float, default=60.0,
+                    help="stop loosening here if the carton never drops")
     ap.add_argument("--grip-context", choices=GRIP_CONTEXTS, default="unknown",
                     help="Deployable object context appended to observation.state for grip-aux policies.")
     ap.add_argument("--grip-control", choices=("direct", "aux"), default="direct",
@@ -1079,6 +1150,16 @@ def main():
             ap.error("grip candidate trial cannot be combined with PV correction recording")
     elif args.grip_candidate_no_load_gate:
         ap.error("--grip-candidate-no-load-gate requires --grip-candidate-trial-model")
+    if args.paired_boundaries:
+        if not args.stall_tighten_step:
+            ap.error("--paired-boundaries needs --stall-tighten-step for the tighten branch")
+        if args.loosen_step <= 0.0 or args.loosen_interval_s <= 0.0:
+            ap.error("--loosen-step and --loosen-interval-s must be positive")
+        if args.gripper_telemetry_hz <= 0.0:
+            ap.error(
+                "--paired-boundaries requires --gripper-telemetry-hz > 0; the boundaries are "
+                "read back off the bus, not inferred from the command"
+            )
     if args.stall_tighten_step < 0.0:
         ap.error("--stall-tighten-step must be non-negative")
     if args.stall_tighten_step:
@@ -1212,6 +1293,8 @@ def main():
     grip_intervention = None
     grip_candidate_trial = None
     stall_tighten = None
+    paired = None
+    paired_operator = None
     evidence = None
     connected = False
     normal_exit = False
@@ -1271,6 +1354,12 @@ def main():
                         "floor_pos": args.stall_tighten_floor,
                         "window_s": args.stall_window_s,
                         "motion_epsilon": args.stall_epsilon,
+                        "paired_boundaries": bool(args.paired_boundaries),
+                        "loosen_step": args.loosen_step if args.paired_boundaries else None,
+                        "loosen_interval_s": (
+                            args.loosen_interval_s if args.paired_boundaries else None
+                        ),
+                        "loosen_ceiling": args.loosen_ceiling if args.paired_boundaries else None,
                     }
                 ),
                 action_step_repeat=args.action_step_repeat,
@@ -1291,7 +1380,31 @@ def main():
                 f"[correction] press {args.takeover_key!r} to toggle PV takeover; "
                 "only takeover windows are added to the correction dataset"
             )
-        if args.stall_tighten_step:
+        if args.paired_boundaries:
+            paired = PairedBoundaryProtocol(
+                tighten=TightenRampConfig(
+                    step=args.stall_tighten_step,
+                    interval_s=args.stall_tighten_interval_s,
+                    floor_pos=args.stall_tighten_floor,
+                ),
+                loosen=LoosenRampConfig(
+                    step=args.loosen_step,
+                    interval_s=args.loosen_interval_s,
+                    ceiling_pos=args.loosen_ceiling,
+                ),
+                stall=StallConfig(
+                    window_s=args.stall_window_s,
+                    motion_epsilon=args.stall_epsilon,
+                ),
+            )
+            paired_operator = PairedBoundaryOperator(paired)
+            paired_operator.start()
+            print(
+                f"[paired] tighten {args.stall_tighten_step:g} on a stall, loosen "
+                f"{args.loosen_step:g} after the lift. Focus the window: 'l' when the carton "
+                "is stably lifted, 'd' the moment it drops, 'q' to stop."
+            )
+        elif args.stall_tighten_step:
             stall_tighten = StallTightenRamp(
                 TightenRampConfig(
                     step=args.stall_tighten_step,
@@ -1378,11 +1491,14 @@ def main():
         while time.perf_counter() < t_end and (args.max_steps is None or n < args.max_steps) and not (
             (correction_toggle is not None and correction_toggle.stop)
             or (grip_intervention is not None and grip_intervention.stop)
+            or (paired_operator is not None and paired_operator.stop)
             or (grip_candidate_trial is not None and grip_candidate_trial.stop)
         ):
             t0 = time.perf_counter()
             if grip_intervention is not None:
                 grip_intervention.poll_input()
+            if paired_operator is not None:
+                paired_operator.poll_input()
             if grip_candidate_trial is not None:
                 grip_candidate_trial.poll_input()
             obs = robot.get_observation()
@@ -1394,7 +1510,15 @@ def main():
                 policy_obs[feature] = obs[feature.rsplit(".", 1)[-1]]
             grip_intent = None
             action_trace = None
-            if grip_intervention is not None and grip_intervention.paused:
+            if paired is not None and paired.freeze_body:
+                # Hold ACT's last body target through the loosen ramp: a carton
+                # the policy has already set back down cannot be dropped, so
+                # the slip boundary has to be measured while the lift is held.
+                if last_predicted_action is None:
+                    raise RuntimeError("paired loosen ramp began before the first policy action")
+                a = last_predicted_action.copy()
+                inference_ms = 0.0
+            elif grip_intervention is not None and grip_intervention.paused:
                 if last_predicted_action is None:
                     raise RuntimeError("grip intervention paused before the first policy action")
                 a = last_predicted_action.copy()
@@ -1466,6 +1590,13 @@ def main():
                     policy_target=float(a[gripper_index]),
                     actual_pos=actual_gripper,
                 )
+            elif paired is not None:
+                a[gripper_index], stall_tighten_label = paired.update(
+                    t=time.perf_counter(),
+                    policy_target=float(a[gripper_index]),
+                    actual_pos=actual_gripper,
+                    body_command=np.delete(a, gripper_index),
+                )
             elif stall_tighten is not None:
                 # The stall is read from the body targets ACT just predicted,
                 # not from readback: a joint holding a load under gravity is
@@ -1482,7 +1613,10 @@ def main():
                     policy_target=float(a[gripper_index]),
                     actual_pos=actual_gripper,
                 )
-            paused_cycle = grip_intervention is not None and grip_intervention.paused
+            paused_cycle = (
+                (grip_intervention is not None and grip_intervention.paused)
+                or (paired is not None and paired.freeze_body)
+            )
             if args.gripper_only:
                 a = hold_body_action(a, state, gripper_index=gripper_index)
             # A paused intervention already reuses last_predicted_action. Keep that
@@ -1618,6 +1752,8 @@ def main():
     finally:
         if correction_toggle is not None:
             correction_toggle.close()
+        if paired_operator is not None:
+            paired_operator.close()
         if grip_intervention is not None:
             grip_intervention.close()
         if grip_candidate_trial is not None:
@@ -1638,8 +1774,33 @@ def main():
                 steps=n,
                 commands_sent=commands_sent,
                 error=run_error,
+                paired_boundaries=(
+                    None
+                    if paired is None
+                    else {
+                        "phase": paired.phase,
+                        "lift_boundary": paired.lift_boundary,
+                        "slip_boundary": paired.slip_boundary,
+                        "loosen_steps": paired.loosen_steps,
+                        "at_ceiling": paired.at_ceiling,
+                        # A trial that reached neither is not a failed trial,
+                        # it is a trial with nothing to pair. Saying so here
+                        # keeps it out of the paired set without a judgement
+                        # call later.
+                        "paired": (
+                            paired.lift_boundary is not None
+                            and paired.slip_boundary is not None
+                        ),
+                    }
+                ),
             )
             print(f"[deploy] evidence: {evidence.path}")
+            if paired is not None:
+                print(
+                    f"[paired] lift_boundary={paired.lift_boundary} "
+                    f"slip_boundary={paired.slip_boundary} "
+                    f"loosen_steps={paired.loosen_steps}"
+                )
         if connected:
             # disconnect with torque held (disable_torque_on_disconnect=False) so the arm keeps its pose.
             robot.disconnect()

@@ -24,6 +24,7 @@ def test_the_expected_wrappers_exist():
         "run_deploy_ee.sh", "run_deploy_grip_ee.sh", "run_deploy_pv_corrections.sh",
         "run_diagnose.sh", "run_teleop_viz.sh", "run_pv_pad.sh", "run_so101_diag.sh",
         "run_carton_fixed_grip_trials.sh", "run_gripper_deadband.sh",
+        "run_paired_boundaries.sh",
         "probe_oak.sh", "view_camera.sh",
     }
 
@@ -76,6 +77,7 @@ NEEDS_GPU = {"run_deploy_ee.sh", "run_deploy_grip_ee.sh", "run_diagnose.sh"}
 # GPU per-invocation, which test_record_so101_pv_ee checks at the source level.
 HARDWARE_GATED = {
     "run_record_pv_ee.sh",
+    "run_paired_boundaries.sh",
     "run_deploy_pv_corrections.sh",
     "run_pv_pad.sh",
     "run_carton_fixed_grip_trials.sh",

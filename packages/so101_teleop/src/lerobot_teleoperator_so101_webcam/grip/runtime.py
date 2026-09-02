@@ -311,6 +311,167 @@ class StallTightenRamp:
         }
 
 
+PAIRED_PHASES = ("following", "loosening", "done")
+
+
+@dataclass(frozen=True)
+class LoosenRampConfig:
+    """The post-lift loosen ramp, sized by the measured loosen deadband."""
+
+    step: float
+    interval_s: float
+    ceiling_pos: float = 60.0
+
+    def __post_init__(self) -> None:
+        values = (self.step, self.interval_s, self.ceiling_pos)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("loosen ramp values must be finite")
+        if self.step <= 0.0:
+            raise ValueError("step must be positive; size it from the deadband calibration")
+        if self.interval_s <= 0.0:
+            raise ValueError("interval_s must be positive")
+        if not 0.0 <= self.ceiling_pos <= 100.0:
+            raise ValueError("ceiling_pos must be a gripper position")
+
+
+class PairedBoundaryProtocol:
+    """Collect a lift boundary and a slip boundary within one grasp.
+
+    The two-branch protocol from 2026-09-01. ACT runs normally; if it stalls,
+    the tighten ramp breaks the stall and that depth is the lift boundary.
+    After a lift -- from either branch, whether the ramp helped or ACT managed
+    alone -- the loosen ramp opens the jaw step by step until the carton drops,
+    and that depth is the slip boundary.
+
+    Continuing into the loosen ramp on the tighten branch too is the whole
+    point. Branching on outcome instead would measure the lift boundary only on
+    loose grasps and the slip boundary only on tight ones, on disjoint
+    populations that could never be compared. Their order is not fixed --
+    trial01 lifted and then slipped, so its lift boundary was looser than its
+    slip boundary, while trial05 suggests the reverse -- and the sign and size
+    of that gap is what says whether ACT's own threshold is conservative or
+    permissive.
+
+    The steps are asymmetric because the hardware is: 2026-09-02 measured the
+    smallest resolvable loosen step at 0.5 and the smallest resolvable tighten
+    step at 2.0. A lift boundary is therefore about four times coarser than a
+    slip boundary, and the tighten step is itself wider than ACT's own
+    lift-versus-fail band.
+
+    Both stopping criteria are events, not fixed windows, which is what makes
+    this immune to the observation-window confound that correlated window
+    length with label in the 2026-08-31 collection.
+    """
+
+    def __init__(
+        self,
+        *,
+        tighten: TightenRampConfig,
+        loosen: LoosenRampConfig,
+        stall: StallConfig | None = None,
+    ):
+        self.tighten_ramp = StallTightenRamp(tighten, stall=stall)
+        self.loosen = loosen
+        self.reset()
+
+    def reset(self) -> None:
+        self.tighten_ramp.reset()
+        self.phase = "following"
+        self.lift_boundary: float | None = None
+        self.slip_boundary: float | None = None
+        self.loosen_steps = 0
+        self.at_ceiling = False
+        self.trace: list[dict] = []
+        self._target: float | None = None
+        self._last_step_at_s: float | None = None
+        self._lift_requested = False
+        self._drop_requested = False
+
+    @property
+    def freeze_body(self) -> bool:
+        """Hold ACT's last body target while the loosen ramp runs.
+
+        A carton the policy has already put back on the table cannot be dropped,
+        so the slip boundary has to be measured while the lift is still held.
+        """
+        return self.phase == "loosening"
+
+    def confirm_lift(self) -> None:
+        """Operator: the carton is stably lifted. Starts the loosen ramp."""
+        self._lift_requested = True
+
+    def mark_drop(self) -> None:
+        """Operator: the carton has dropped. Ends the loosen ramp."""
+        self._drop_requested = True
+
+    def update(self, *, t: float, policy_target: float, actual_pos: float, body_command):
+        lift_requested, self._lift_requested = self._lift_requested, False
+        drop_requested, self._drop_requested = self._drop_requested, False
+        policy_target = float(policy_target)
+        actual_pos = float(actual_pos)
+
+        if self.phase == "following":
+            if lift_requested:
+                self.phase = "loosening"
+                self._target = actual_pos
+                self._last_step_at_s = t
+                return self._record(t, self._target, actual_pos, "lift_confirmed", 0.0, None)
+            target, label = self.tighten_ramp.update(
+                t=t,
+                policy_target=policy_target,
+                actual_pos=actual_pos,
+                body_command=body_command,
+            )
+            if self.tighten_ramp.lift_boundary is not None and self.lift_boundary is None:
+                self.lift_boundary = self.tighten_ramp.lift_boundary
+            return self._record(t, target, actual_pos, label["action"], label["delta_q"], label)
+
+        if self.phase == "done":
+            return self._record(t, policy_target, actual_pos, "done", 0.0, None)
+
+        # Loosening.
+        if drop_requested:
+            # Readback, not the commanded value: the command runs ahead of the
+            # jaw by the standing offset, and on this gripper only about 90% of
+            # a commanded loosen becomes travel.
+            self.slip_boundary = actual_pos
+            self.phase = "done"
+            return self._record(t, policy_target, actual_pos, "drop_marked", 0.0, None)
+
+        if t - self._last_step_at_s < self.loosen.interval_s:
+            return self._record(t, self._target, actual_pos, "dwelling", 0.0, None)
+
+        self._last_step_at_s = t
+        stepped = self._target + self.loosen.step
+        if stepped > self.loosen.ceiling_pos:
+            self.at_ceiling = True
+            return self._record(t, self._target, actual_pos, "at_ceiling", 0.0, None)
+        delta = stepped - self._target
+        self._target = stepped
+        self.loosen_steps += 1
+        return self._record(t, self._target, actual_pos, "loosen", delta, None)
+
+    def _record(self, t, target, actual_pos, action, delta_q, stall_label):
+        label = {
+            "phase": self.phase,
+            "action": action,
+            "delta_q": float(delta_q),
+            "ramp_target": None if target is None else float(target),
+            "actual_pos": actual_pos,
+            "loosen_steps": self.loosen_steps,
+            "at_ceiling": self.at_ceiling,
+            "lift_boundary": self.lift_boundary,
+            "slip_boundary": self.slip_boundary,
+            "freeze_body": self.freeze_body,
+            "stall": stall_label,
+        }
+        # The whole ramp is kept, not just the marked instant. The operator's
+        # keypress lags the drop, and the videos are 10 fps locked one frame per
+        # control step, so the true event has to be found offline in this trace.
+        self.trace.append({"t": float(t), **label})
+        return (float(target) if target is not None else 0.0), label
+
+
 class GripResidualHead(torch.nn.Module):
     """Small numeric head for a signed gripper suggestion and grasp stability."""
 
