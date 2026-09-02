@@ -49,11 +49,36 @@ person.
 
 ### Policies
 
-| Model | |
-| --- | --- |
-| [`act_pickplace`](https://huggingface.co/stevenzenith/act_pickplace), [`dp_pickplace`](https://huggingface.co/stevenzenith/dp_pickplace) | the pick-place line — **public** |
-| [`act_carton_phase_c_80k`](https://huggingface.co/stevenzenith/act_carton_phase_c_80k), [`diffusion_carton_phase_c_90k`](https://huggingface.co/stevenzenith/diffusion_carton_phase_c_90k), [`smolvla_carton_phase_c_80k`](https://huggingface.co/stevenzenith/smolvla_carton_phase_c_80k) | the carton line |
-| [`act_carton_phase_c_50k`](https://huggingface.co/stevenzenith/act_carton_phase_c_50k) → [`act_carton_middle_labels_5k`](https://huggingface.co/stevenzenith/act_carton_middle_labels_5k) | base and its middle-labels fine-tune |
+Two tasks, not one line of work.
+
+**Wooden-block pick and place** — the earlier task, plain teleoperated
+demonstrations, no PressureVision. Both policies are **public**:
+[`act_pickplace`](https://huggingface.co/stevenzenith/act_pickplace) and
+[`dp_pickplace`](https://huggingface.co/stevenzenith/dp_pickplace), trained on
+`hand_tracking_pick_place`.
+
+**Dual-view PressureVision carton pick** — the current task. Every model below
+is the same task, differing in data split, augmentation, architecture and steps:
+
+| Model | Trained on | |
+| --- | --- | --- |
+| [`act_carton_phase_c_80k`](https://huggingface.co/stevenzenith/act_carton_phase_c_80k) | phase_b | |
+| [`diffusion_carton_phase_c_90k`](https://huggingface.co/stevenzenith/diffusion_carton_phase_c_90k) | phase_b | |
+| [`smolvla_carton_phase_c_80k`](https://huggingface.co/stevenzenith/smolvla_carton_phase_c_80k) | phase_b | |
+| [`act_carton_phase_c_50k`](https://huggingface.co/stevenzenith/act_carton_phase_c_50k) | phase_b_train24, augmented | the fine-tune base |
+| [`act_carton_middle_labels_2k`](https://huggingface.co/stevenzenith/act_carton_middle_labels_2k) | + middle_standard | **the selected checkpoint** |
+| [`act_carton_middle_labels_5k`](https://huggingface.co/stevenzenith/act_carton_middle_labels_5k) | + middle_standard | end of the sweep, not selected |
+
+Adding the middle-pose episodes to the 50k base is what produced the best
+behaviour on this task. The 2k checkpoint was selected on held-out middle
+episodes (body MAE 1.355, 2 false closes in 172 open-phase frames) as a
+**bounded physical candidate, not a universal offline winner** — 1k has a lower
+MAE but closes falsely six times as often, and the full table is in
+`training/TRAINING_HANDOFF.md`.
+
+It is **not approved for autonomous deployment**: on the arm it produced real
+lifts and also no-lift, slip and no-release outcomes. A from-scratch control on
+the same data is a documented NO-GO.
 
 Everything above except the two pick-place policies is **private**, as is this
 repository, so those links 404 for anyone without access. Publishing is a
