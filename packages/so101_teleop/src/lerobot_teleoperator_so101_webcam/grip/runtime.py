@@ -334,6 +334,16 @@ class StallTightenRamp:
             self.deepest_target = stepped
         return self.target, self._label(stall, "tighten", delta)
 
+    def hand_back(self) -> None:
+        """Drop the live ramp without recording a boundary.
+
+        For a caller that has already taken the label itself. Without it the
+        ramp's stale target survives, and the next cycle that sees the ramp
+        disengaged reads it as the stall having just broken -- writing a
+        boundary from wherever the jaw happens to be at that moment.
+        """
+        self._release()
+
     def _release(self) -> None:
         self.target = None
         self.steps_applied = 0
@@ -437,6 +447,8 @@ class PairedBoundaryProtocol:
         self._lift_requested = False
         self._slip_requested = False
         self._drop_requested = False
+        self._undo_requested = False
+        self._lift_boundary_from_confirm = False
         self.tighten_engaged = False
 
     @property
@@ -463,6 +475,15 @@ class PairedBoundaryProtocol:
         self._lift_requested = True
         self.tighten_engaged = False
 
+    def undo_lift(self) -> None:
+        """Operator: the lift confirmation was premature; go back to following.
+
+        Only while the loosen ramp has recorded nothing. Once a boundary is
+        marked the trial has data, and silently discarding it on a stray press
+        would be worse than the trial that press ruined.
+        """
+        self._undo_requested = True
+
     def mark_slip_onset(self) -> None:
         """Operator: a face of the carton has begun to slide. Ramp continues."""
         self._slip_requested = True
@@ -475,6 +496,7 @@ class PairedBoundaryProtocol:
         lift_requested, self._lift_requested = self._lift_requested, False
         slip_requested, self._slip_requested = self._slip_requested, False
         drop_requested, self._drop_requested = self._drop_requested, False
+        undo_requested, self._undo_requested = self._undo_requested, False
         policy_target = float(policy_target)
         actual_pos = float(actual_pos)
 
@@ -487,6 +509,8 @@ class PairedBoundaryProtocol:
                 # the trials where tightening bought the lift.
                 if self.lift_boundary is None and self.tighten_ramp.total_steps_applied:
                     self.lift_boundary = actual_pos
+                    self._lift_boundary_from_confirm = True
+                self.tighten_ramp.hand_back()
                 self.phase = "loosening"
                 self._target = actual_pos
                 self._last_step_at_s = t
@@ -506,6 +530,25 @@ class PairedBoundaryProtocol:
             return self._record(t, policy_target, actual_pos, "done", 0.0, None)
 
         # Loosening.
+        if (
+            undo_requested
+            and self.slip_onset_boundary is None
+            and self.drop_boundary is None
+        ):
+            # The jaw stays where the ramp left it; ACT commands its own target
+            # again from the next cycle. The carton has still been loosened by
+            # however far the ramp got, which is why this is an undo of the
+            # confirmation and not of the trial.
+            if self._lift_boundary_from_confirm:
+                self.lift_boundary = None
+                self._lift_boundary_from_confirm = False
+            self.phase = "following"
+            self._target = None
+            self._last_step_at_s = None
+            self.loosen_steps = 0
+            self.at_ceiling = False
+            return self._record(t, policy_target, actual_pos, "lift_unconfirmed", 0.0, None)
+
         if slip_requested and self.slip_onset_boundary is None:
             # The ramp keeps going: the drop is still wanted as the outer
             # bound, and stopping here would collect only one of the two.

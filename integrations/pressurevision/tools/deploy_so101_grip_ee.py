@@ -555,7 +555,7 @@ class PairedBoundaryOperator:
     def __init__(self, protocol: PairedBoundaryProtocol):
         self.protocol = protocol
         self.stop = False
-        self.window_name = "Paired:  A tighten  S lifted  D slipping  F dropped  |  Q stop"
+        self.window_name = "Paired:  A tighten  S lifted  D slipping  F dropped  W undo  |  Q stop"
 
     def start(self) -> None:
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
@@ -567,7 +567,7 @@ class PairedBoundaryOperator:
         phase = self.protocol.phase
         prompt = {
             "following": "A if it grips but will not lift;  S once STABLY LIFTED",
-            "loosening": "D when a face STARTS to slide;  F when it lets go",
+            "loosening": "D a face STARTS to slide;  F it lets go;  W undo a premature S",
             "done": "done; both branches recorded",
         }[phase]
         lift = self.protocol.lift_boundary
@@ -584,7 +584,7 @@ class PairedBoundaryOperator:
             ),
             (
                 f"tighten {'ON' if self.protocol.tighten_engaged else 'off'}     "
-                "A tighten   S lifted   D slipping   F dropped   Q stop",
+                "A tighten   S lifted   D slipping   F dropped   W undo   Q stop",
                 (180, 180, 180),
             ),
         )
@@ -611,6 +611,10 @@ class PairedBoundaryOperator:
             if phase == "loosening":
                 self.protocol.mark_drop()
                 print("[paired] drop marked; loosening ends")
+        elif key == ord("w"):
+            if phase == "loosening":
+                self.protocol.undo_lift()
+                print("[paired] lift unconfirmed; back to following (the jaw stays where it is)")
         elif key in {ord("q"), 27}:
             self.stop = True
 

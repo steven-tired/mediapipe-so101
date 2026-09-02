@@ -41,7 +41,10 @@ def _run(protocol, *, seconds, body_at, policy_target=28.0, hz=10.0, events=()):
         t = index / hz
         while pending and pending[0][0] <= t:
             _, event = pending.pop(0)
-            getattr(protocol, event)()
+            if event == "set_tighten_off":
+                protocol.set_tighten(False)
+            else:
+                getattr(protocol, event)()
         target, label = protocol.update(
             t=t, policy_target=policy_target, actual_pos=actual, body_command=body_at(t)
         )
@@ -215,3 +218,35 @@ def test_a_second_slip_mark_does_not_move_the_onset():
     protocol.mark_slip_onset()
     protocol.update(t=1.5, policy_target=28.0, actual_pos=31.0, body_command=lifting(1.5))
     assert protocol.slip_onset_boundary == first
+
+
+def test_a_premature_lift_confirmation_can_be_undone():
+    """Two trials were discarded to an S pressed before the carton was up."""
+    protocol = _protocol()
+    protocol.set_tighten(True)
+    _run(protocol, seconds=8.0,
+         body_at=lambda t: STALLED if t < 4.0 else lifting(t - 4.0),
+         events=[(4.0, "confirm_lift"), (6.0, "undo_lift")])
+    assert protocol.phase == "following"
+    assert protocol.freeze_body is False, "the body has to move again"
+    assert protocol.loosen_steps == 0
+    assert protocol.lift_boundary is None, "that confirmation set it, so it goes too"
+
+
+def test_undo_does_not_discard_a_boundary_already_marked():
+    protocol = _protocol()
+    _run(protocol, seconds=8.0, body_at=lambda t: lifting(t),
+         events=[(1.0, "confirm_lift"), (4.0, "mark_slip_onset"), (5.0, "undo_lift")])
+    assert protocol.phase == "loosening"
+    assert protocol.slip_onset_boundary is not None
+
+
+def test_undo_keeps_a_lift_boundary_the_tighten_ramp_recorded_itself():
+    """Released with A, so the ramp recorded it -- the S did not."""
+    protocol = _protocol()
+    protocol.set_tighten(True)
+    _run(protocol, seconds=12.0,
+         body_at=lambda t: STALLED if t < 4.0 else lifting(t - 4.0),
+         events=[(4.0, "set_tighten_off"), (6.0, "confirm_lift"), (8.0, "undo_lift")])
+    assert protocol.lift_boundary is not None
+    assert protocol.phase == "following"
