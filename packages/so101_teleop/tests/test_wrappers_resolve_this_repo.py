@@ -30,6 +30,20 @@ def test_the_expected_wrappers_exist():
 
 
 @pytest.mark.parametrize("wrapper", WRAPPERS, ids=lambda p: p.name)
+def test_wrapper_parses(wrapper):
+    """`bash -n` every wrapper.
+
+    An apostrophe inside `${VAR:?...}` starts a quote, so a helpful message
+    ("the checkpoint's directory") made run_paired_boundaries.sh unparseable.
+    The hardware-gated check below did not catch it: a syntax error also exits
+    non-zero, which is all that test asserts, so a wrapper that could never run
+    passed as one that refuses to run.
+    """
+    out = subprocess.run(["bash", "-n", str(wrapper)], capture_output=True, text=True)
+    assert out.returncode == 0, f"{wrapper.name} is not valid bash:\n{out.stderr}"
+
+
+@pytest.mark.parametrize("wrapper", WRAPPERS, ids=lambda p: p.name)
 def test_wrapper_is_executable_and_sources_common(wrapper):
     assert os.access(wrapper, os.X_OK), f"{wrapper.name} is not executable"
     assert "_common.sh" in wrapper.read_text(encoding="utf-8")

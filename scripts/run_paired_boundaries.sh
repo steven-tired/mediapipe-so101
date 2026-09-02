@@ -19,7 +19,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 export PYTHONPATH="$REPO/integrations/pressurevision/tools:$PYTHONPATH"
 
 : "${TRIAL:?set TRIAL to the trial number, e.g. TRIAL=01}"
-: "${SO101_GRIP_POLICY:?set SO101_GRIP_POLICY to the checkpoint's pretrained_model directory}"
+: "${SO101_GRIP_POLICY:?set SO101_GRIP_POLICY to the pretrained_model directory of the checkpoint}"
 
 EVIDENCE_ROOT="${SO101_EVIDENCE_DIR:-$REPO/local/evidence}"
 OUT="$EVIDENCE_ROOT/phase_c_recovery_minimal/paired_boundary_trial${TRIAL}_$(date +%Y%m%d)"
