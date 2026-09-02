@@ -92,8 +92,8 @@ def test_the_loosen_ramp_runs_after_a_lift_and_stops_on_the_drop():
     loosens = [label for _, _, label in trace if label["action"] == "loosen"]
     assert loosens, "the ramp never stepped"
     assert all(label["delta_q"] == pytest.approx(0.5) for label in loosens)
-    assert protocol.slip_boundary is not None
-    assert protocol.slip_boundary > 28.0, "loosening opens the jaw"
+    assert protocol.drop_boundary is not None
+    assert protocol.drop_boundary > 28.0, "loosening opens the jaw"
     assert protocol.phase == "done"
 
 
@@ -115,11 +115,11 @@ def test_the_slip_boundary_is_readback_and_not_the_command():
         # The jaw lags its command, as it does on the bench.
         actual += 0.9 * (target - actual)
 
-    assert protocol.slip_boundary == pytest.approx(jaw_at_drop)
+    assert protocol.drop_boundary == pytest.approx(jaw_at_drop)
     # Loosening opens the jaw and the jaw trails the command, so the readback
     # is the tighter of the two. Recording the command would overstate how far
     # open the grasp actually was when it let go.
-    assert protocol.slip_boundary < last_ramp_target
+    assert protocol.drop_boundary < last_ramp_target
 
 
 def test_the_body_is_frozen_only_while_loosening():
@@ -143,7 +143,7 @@ def test_the_loosen_ramp_stops_at_the_ceiling_without_a_boundary():
         protocol, seconds=8.0, body_at=lambda t: lifting(t), events=[(0.5, "confirm_lift")]
     )
     assert trace[-1][2]["at_ceiling"] is True
-    assert protocol.slip_boundary is None, "nothing dropped, so nothing is labelled"
+    assert protocol.drop_boundary is None, "nothing dropped, so nothing is labelled"
     assert trace[-1][1] == pytest.approx(30.0)
 
 
@@ -171,7 +171,7 @@ def test_a_lift_confirmed_without_any_stall_still_collects_a_slip_boundary():
         events=[(0.5, "confirm_lift"), (4.0, "mark_drop")],
     )
     assert protocol.lift_boundary is None, "ACT lifted on its own; no tightening bought it"
-    assert protocol.slip_boundary is not None
+    assert protocol.drop_boundary is not None
 
 
 def test_the_steps_must_be_sized_from_a_calibration():
@@ -181,3 +181,37 @@ def test_the_steps_must_be_sized_from_a_calibration():
         LoosenRampConfig(step=0.5, interval_s=0.0)
     with pytest.raises(ValueError):
         LoosenRampConfig(step=0.5, interval_s=0.5, ceiling_pos=101.0)
+
+
+def test_slip_onset_and_drop_are_two_boundaries_and_the_ramp_keeps_going():
+    """Slip is not an event: a face slides well before the carton lets go.
+
+    On the 2026-09-02 trial the operator marked the drop while one side had
+    been sliding since the lift, so the drop is the late unambiguous bound and
+    the onset is the early one. Marking the onset must not end the ramp, or
+    only one of the two would ever be collected.
+    """
+    protocol = _protocol()
+    trace = _run(
+        protocol,
+        seconds=10.0,
+        body_at=lambda t: lifting(t),
+        events=[(1.0, "confirm_lift"), (4.0, "mark_slip_onset"), (8.0, "mark_drop")],
+    )
+    assert protocol.slip_onset_boundary is not None
+    assert protocol.drop_boundary is not None
+    assert protocol.slip_onset_boundary < protocol.drop_boundary, "onset comes first, tighter"
+    after = [label for t, _, label in trace if 4.0 < t < 8.0 and label["action"] == "loosen"]
+    assert after, "the ramp must continue past the onset to reach the drop"
+
+
+def test_a_second_slip_mark_does_not_move_the_onset():
+    protocol = _protocol()
+    protocol.confirm_lift()
+    protocol.update(t=0.0, policy_target=28.0, actual_pos=28.0, body_command=lifting(0.0))
+    protocol.mark_slip_onset()
+    protocol.update(t=0.1, policy_target=28.0, actual_pos=28.0, body_command=lifting(0.1))
+    first = protocol.slip_onset_boundary
+    protocol.mark_slip_onset()
+    protocol.update(t=1.5, policy_target=28.0, actual_pos=31.0, body_command=lifting(1.5))
+    assert protocol.slip_onset_boundary == first

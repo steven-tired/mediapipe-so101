@@ -472,20 +472,21 @@ class TightenRampOperator:
     def __init__(self):
         self.engaged = False
         self.stop = False
-        self.window_name = "Tighten ramp: t = grasped but not lifting | q stop"
+        self.window_name = "Tighten ramp:  A = grip but no lift  |  Q = stop"
 
     def start(self) -> None:
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.window_name, 760, 160)
+        cv2.resizeWindow(self.window_name, 760, 240)
 
-    def poll_input(self, ramp) -> None:
-        canvas = np.zeros((160, 760, 3), dtype=np.uint8)
+    def poll_input(self, ramp, *, gripper_cmd=None, gripper_read=None) -> None:
+        canvas = np.zeros((240, 760, 3), dtype=np.uint8)
+        _draw_gripper(canvas, gripper_cmd, gripper_read)
         deepest = ramp.deepest_target
-        for index, (text, colour) in enumerate((
+        rows = (
             (
-                "TIGHTENING - press t THE MOMENT it lifts, to record the boundary"
+                "TIGHTENING - press A the moment it lifts, to record the boundary"
                 if self.engaged
-                else "watching; press t if it grips but will not lift",
+                else "watching; press A if it grips but will not lift",
                 (0, 255, 0) if self.engaged else (0, 200, 255),
             ),
             (
@@ -494,13 +495,14 @@ class TightenRampOperator:
                 f"floor {'REACHED' if ramp.reached_floor else 'clear'}",
                 (255, 255, 255),
             ),
-            ("t = toggle tighten | q stop", (180, 180, 180)),
-        )):
-            cv2.putText(canvas, text, (20, 45 + index * 45),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.62, colour, 2)
+            ("A = toggle tighten     Q = stop", (180, 180, 180)),
+        )
+        for index, (text, colour) in enumerate(rows):
+            cv2.putText(canvas, text, (20, 130 + index * 34),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.58, colour, 2)
         cv2.imshow(self.window_name, canvas)
         key = cv2.waitKey(1) & 0xFF
-        if key == ord("t"):
+        if key == ord("a"):
             self.engaged = not self.engaged
             print(f"[tighten ramp] {'ENGAGED' if self.engaged else 'released'}")
         elif key in {ord("q"), 27}:
@@ -511,56 +513,90 @@ class TightenRampOperator:
         cv2.destroyWindow(self.window_name)
 
 
+def _draw_gripper(canvas, gripper_cmd, gripper_read) -> None:
+    """The gripper position, large, at the top of every operator window.
+
+    It is the quantity every one of these keys is about, and reading it off the
+    terminal while watching the carton is not possible.
+    """
+    read = "--" if gripper_read is None else f"{gripper_read:6.2f}"
+    cmd = "--" if gripper_cmd is None else f"{gripper_cmd:6.2f}"
+    cv2.putText(canvas, f"q {read}", (20, 62), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 0), 3)
+    cv2.putText(canvas, f"cmd {cmd}", (300, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 150), 2)
+    # A bar from fully closed to fully open, so the trend is visible without
+    # reading digits while watching the carton.
+    x0, x1, y = 300, 740, 74
+    cv2.rectangle(canvas, (x0, y), (x1, y + 14), (60, 60, 60), -1)
+    if gripper_read is not None:
+        frac = min(max(float(gripper_read) / 100.0, 0.0), 1.0)
+        cv2.rectangle(canvas, (x0, y), (x0 + int((x1 - x0) * frac), y + 14), (255, 255, 0), -1)
+    if gripper_cmd is not None:
+        frac = min(max(float(gripper_cmd) / 100.0, 0.0), 1.0)
+        x = x0 + int((x1 - x0) * frac)
+        cv2.line(canvas, (x, y - 4), (x, y + 18), (0, 165, 255), 2)
+    cv2.line(canvas, (0, 96), (760, 96), (70, 70, 70), 1)
+
+
 class PairedBoundaryOperator:
     """Keyboard front end for the paired lift/slip collection.
 
-    Two keys, because the protocol has exactly two events the operator can see
-    and the machine cannot: the carton is stably lifted, and the carton has
-    dropped. Everything else -- the stall, the stall breaking, the ramps -- is
-    decided from the commands and the readback.
+    Four keys on the left home row, in the order the trial runs, because they
+    are pressed while watching the carton rather than the keyboard:
+
+        A  the carton is gripped but will not come up   -> tighten
+        S  the carton is stably lifted                  -> start loosening
+        D  a face of the carton has started to slide    -> slip onset
+        F  the carton has let go                        -> drop
+
+    These are the events a person can see and the machine cannot. The stall,
+    the ramps and both boundaries are computed from commands and readback.
     """
 
     def __init__(self, protocol: PairedBoundaryProtocol):
         self.protocol = protocol
         self.stop = False
-        self.window_name = "Paired boundaries: t = tighten | l = lifted | d = dropped | q stop"
+        self.window_name = "Paired:  A tighten  S lifted  D slipping  F dropped  |  Q stop"
 
     def start(self) -> None:
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.window_name, 760, 220)
+        cv2.resizeWindow(self.window_name, 760, 260)
 
-    def poll_input(self) -> None:
-        canvas = np.zeros((220, 760, 3), dtype=np.uint8)
+    def poll_input(self, *, gripper_cmd=None, gripper_read=None) -> None:
+        canvas = np.zeros((260, 760, 3), dtype=np.uint8)
+        _draw_gripper(canvas, gripper_cmd, gripper_read)
         phase = self.protocol.phase
         prompt = {
-            "following": "press t if it grips but will not lift; l once STABLY LIFTED",
-            "loosening": "loosening until it drops; press d THE MOMENT it lets go",
+            "following": "A if it grips but will not lift;  S once STABLY LIFTED",
+            "loosening": "D when a face STARTS to slide;  F when it lets go",
             "done": "done; both branches recorded",
         }[phase]
         lift = self.protocol.lift_boundary
-        slip = self.protocol.slip_boundary
-        for index, (text, colour) in enumerate((
+        onset = self.protocol.slip_onset_boundary
+        drop = self.protocol.drop_boundary
+        rows = (
             (f"phase: {phase}", (0, 255, 0) if phase == "loosening" else (0, 200, 255)),
             (prompt, (255, 255, 255)),
             (
-                f"lift boundary: {'--' if lift is None else f'{lift:.2f}'}    "
-                f"slip boundary: {'--' if slip is None else f'{slip:.2f}'}",
+                f"lift {'--' if lift is None else f'{lift:.2f}'}   "
+                f"slip-onset {'--' if onset is None else f'{onset:.2f}'}   "
+                f"drop {'--' if drop is None else f'{drop:.2f}'}",
                 (255, 255, 255),
             ),
             (
-                f"tighten: {'ON' if self.protocol.tighten_engaged else 'off'}    "
-                "t = tighten | l = lifted | d = dropped | q stop",
+                f"tighten {'ON' if self.protocol.tighten_engaged else 'off'}     "
+                "A tighten   S lifted   D slipping   F dropped   Q stop",
                 (180, 180, 180),
             ),
-        )):
-            cv2.putText(canvas, text, (20, 45 + index * 45),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.62, colour, 2)
+        )
+        for index, (text, colour) in enumerate(rows):
+            cv2.putText(canvas, text, (20, 128 + index * 32),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.56, colour, 2)
         cv2.imshow(self.window_name, canvas)
         key = cv2.waitKey(1) & 0xFF
-        if key == ord("t"):
+        if key == ord("a"):
             self.protocol.set_tighten(not self.protocol.tighten_engaged)
             print(f"[paired] tighten {'ENGAGED' if self.protocol.tighten_engaged else 'released'}")
-        elif key == ord("l"):
+        elif key == ord("s"):
             # Only in the phase where it means something. Repeating the print
             # for presses the protocol ignores makes the log read as if the
             # loosen ramp restarted three times.
@@ -568,6 +604,10 @@ class PairedBoundaryOperator:
                 self.protocol.confirm_lift()
                 print("[paired] lift confirmed; loosening starts")
         elif key == ord("d"):
+            if phase == "loosening":
+                self.protocol.mark_slip_onset()
+                print("[paired] slip onset marked; the ramp continues to the drop")
+        elif key == ord("f"):
             if phase == "loosening":
                 self.protocol.mark_drop()
                 print("[paired] drop marked; loosening ends")
@@ -1468,9 +1508,10 @@ def main():
             paired_operator = PairedBoundaryOperator(paired)
             paired_operator.start()
             print(
-                f"[paired] tighten {args.stall_tighten_step:g} on a stall, loosen "
-                f"{args.loosen_step:g} after the lift. Focus the window: 'l' when the carton "
-                "is stably lifted, 'd' the moment it drops, 'q' to stop."
+                f"[paired] tighten {args.stall_tighten_step:g}, loosen {args.loosen_step:g}. "
+                "Focus the window; keys are the left home row in trial order: "
+                "A gripped-but-no-lift, S stably lifted, D a face starts to slide, "
+                "F it lets go, Q stop."
             )
         elif args.stall_tighten_step:
             stall_tighten = StallTightenRamp(
@@ -1487,10 +1528,10 @@ def main():
             stall_operator = TightenRampOperator()
             stall_operator.start()
             print(
-                f"[tighten ramp] focus the window and press 't' when the carton is gripped but "
+                f"[tighten ramp] focus the window and press 'A' when the carton is gripped but "
                 f"will not come up: tighten {args.stall_tighten_step:g} every "
                 f"{args.stall_tighten_interval_s:g}s down to a floor of "
-                f"{args.stall_tighten_floor:g}. Press 't' again to hand back to ACT. "
+                f"{args.stall_tighten_floor:g}. Press 'A' again to hand back to ACT. "
                 "The stall detector still records, but does not drive the ramp."
             )
         if args.grip_intervention_step:
@@ -1549,6 +1590,8 @@ def main():
         )
         last_telemetry_at = None
         last_predicted_action = None
+        shown_gripper_cmd = None
+        shown_gripper_read = None
         repeat_remaining = 0
         pending_action_count = False
         run_started = time.perf_counter()
@@ -1569,10 +1612,19 @@ def main():
             t0 = time.perf_counter()
             if grip_intervention is not None:
                 grip_intervention.poll_input()
+            # The previous cycle's gripper values: the windows are polled
+            # before this cycle's observation is read, and one control frame of
+            # lag on a display is not worth an extra bus read.
             if paired_operator is not None:
-                paired_operator.poll_input()
+                paired_operator.poll_input(
+                    gripper_cmd=shown_gripper_cmd, gripper_read=shown_gripper_read
+                )
             if stall_operator is not None:
-                stall_operator.poll_input(stall_tighten)
+                stall_operator.poll_input(
+                    stall_tighten,
+                    gripper_cmd=shown_gripper_cmd,
+                    gripper_read=shown_gripper_read,
+                )
             if grip_candidate_trial is not None:
                 grip_candidate_trial.poll_input()
             obs = robot.get_observation()
@@ -1643,6 +1695,7 @@ def main():
                 pv_supervision = pv_supervision_from_reading(reading)
 
             actual_gripper = float(obs["gripper.pos"])
+            shown_gripper_read = actual_gripper
             grip_intervention_label = None
             grip_candidate_control = None
             stall_tighten_label = None
@@ -1697,6 +1750,7 @@ def main():
             # A paused intervention already reuses last_predicted_action. Keep that
             # fixed body target instead of replacing it with lagging readback.
 
+            shown_gripper_cmd = float(a[gripper_index])
             planned_action = {f"{motor}.pos": float(a[i]) for i, motor in enumerate(motors)}
             command_sent = False
             bus_action = None
@@ -1857,7 +1911,8 @@ def main():
                     else {
                         "phase": paired.phase,
                         "lift_boundary": paired.lift_boundary,
-                        "slip_boundary": paired.slip_boundary,
+                        "slip_onset_boundary": paired.slip_onset_boundary,
+                        "drop_boundary": paired.drop_boundary,
                         "loosen_steps": paired.loosen_steps,
                         "at_ceiling": paired.at_ceiling,
                         # A trial that reached neither is not a failed trial,
@@ -1866,7 +1921,7 @@ def main():
                         # call later.
                         "paired": (
                             paired.lift_boundary is not None
-                            and paired.slip_boundary is not None
+                            and paired.drop_boundary is not None
                         ),
                     }
                 ),
@@ -1911,8 +1966,9 @@ def main():
                 )
             if paired is not None:
                 print(
-                    f"[paired] lift_boundary={paired.lift_boundary} "
-                    f"slip_boundary={paired.slip_boundary} "
+                    f"[paired] lift={paired.lift_boundary} "
+                    f"slip_onset={paired.slip_onset_boundary} "
+                    f"drop={paired.drop_boundary} "
                     f"loosen_steps={paired.loosen_steps}"
                 )
         if connected:

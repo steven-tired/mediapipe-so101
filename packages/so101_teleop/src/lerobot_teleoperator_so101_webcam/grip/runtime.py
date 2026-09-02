@@ -419,13 +419,23 @@ class PairedBoundaryProtocol:
         self.tighten_ramp.reset()
         self.phase = "following"
         self.lift_boundary: float | None = None
-        self.slip_boundary: float | None = None
+        # Two boundaries, because slip is not an event. On the 2026-09-02
+        # trial the operator marked the drop, but one side of the carton had
+        # started sliding as soon as it came up -- so the drop is a late,
+        # unambiguous bound and the onset is the early, softer one. A grasp
+        # that lets a face slide is already scraping the carton, which is
+        # already a failure of the minimum-sufficient-grip objective, so the
+        # onset is the more likely training target. Both are collected; which
+        # one the head is fitted against is still open.
+        self.slip_onset_boundary: float | None = None
+        self.drop_boundary: float | None = None
         self.loosen_steps = 0
         self.at_ceiling = False
         self.trace: list[dict] = []
         self._target: float | None = None
         self._last_step_at_s: float | None = None
         self._lift_requested = False
+        self._slip_requested = False
         self._drop_requested = False
         self.tighten_engaged = False
 
@@ -453,12 +463,17 @@ class PairedBoundaryProtocol:
         self._lift_requested = True
         self.tighten_engaged = False
 
+    def mark_slip_onset(self) -> None:
+        """Operator: a face of the carton has begun to slide. Ramp continues."""
+        self._slip_requested = True
+
     def mark_drop(self) -> None:
         """Operator: the carton has dropped. Ends the loosen ramp."""
         self._drop_requested = True
 
     def update(self, *, t: float, policy_target: float, actual_pos: float, body_command):
         lift_requested, self._lift_requested = self._lift_requested, False
+        slip_requested, self._slip_requested = self._slip_requested, False
         drop_requested, self._drop_requested = self._drop_requested, False
         policy_target = float(policy_target)
         actual_pos = float(actual_pos)
@@ -491,11 +506,17 @@ class PairedBoundaryProtocol:
             return self._record(t, policy_target, actual_pos, "done", 0.0, None)
 
         # Loosening.
+        if slip_requested and self.slip_onset_boundary is None:
+            # The ramp keeps going: the drop is still wanted as the outer
+            # bound, and stopping here would collect only one of the two.
+            self.slip_onset_boundary = actual_pos
+            return self._record(t, self._target, actual_pos, "slip_onset_marked", 0.0, None)
+
         if drop_requested:
             # Readback, not the commanded value: the command runs ahead of the
             # jaw by the standing offset, and on this gripper only about 90% of
             # a commanded loosen becomes travel.
-            self.slip_boundary = actual_pos
+            self.drop_boundary = actual_pos
             self.phase = "done"
             return self._record(t, policy_target, actual_pos, "drop_marked", 0.0, None)
 
@@ -522,7 +543,8 @@ class PairedBoundaryProtocol:
             "loosen_steps": self.loosen_steps,
             "at_ceiling": self.at_ceiling,
             "lift_boundary": self.lift_boundary,
-            "slip_boundary": self.slip_boundary,
+            "slip_onset_boundary": self.slip_onset_boundary,
+            "drop_boundary": self.drop_boundary,
             "freeze_body": self.freeze_body,
             "stall": stall_label,
         }
