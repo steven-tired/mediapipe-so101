@@ -198,6 +198,23 @@ hides the GPU per-invocation rather than for the whole script (so the sender
 keeps the GPU it needs), and `deploy_so101_grip_ee.py` defaults to the Hub copy
 of the ACT 80k final instead of a local checkpoint path.
 
+### Tooling migrated afterwards
+
+Auditing what was left behind turned up work the phase had missed, including a
+precondition of the procedure below:
+
+- **The camera alignment tool.** `view_camera.py`, its dp50/dp100 profiles and
+  its tests lived only in the meta-workspace, so `--profile` — which the
+  procedure below depends on, and which decides whether a policy sees the
+  layout it was trained on — did not exist here at all.
+- **A mislabelled wrapper.** `view_camera.sh` ran `teleop_viz`, which *drives
+  the arm*, while its own comment said "no arm motion". They are now separate
+  wrappers (`view_camera.sh` and `run_teleop_viz.sh`) and a test checks which
+  module each one actually launches, ignoring what its comments mention.
+- **Five PV/OAK entry points**: the pad rig (`run_pv_pad.sh`), the fixed-pose
+  carton trials, the correction-recording deploy, and the OAK probe with its
+  wrapper. The programs were already here; only the entry points were missing.
+
 ### What was deliberately not migrated
 
 The IR-shadow recording path (`record_so101_ee` under `SO101_IR_PRESSURE`, and
@@ -226,7 +243,8 @@ evidence is unaffected; only the ability to record more of it is gone.
 
 The procedure, so it can be run without re-deriving it. Preconditions: SO-101 on
 `usb-1a86_USB_Single_Serial_5B14110850`, the Creative Live! Cam workspace
-camera, `./scripts/view_camera.sh --profile dp100` for alignment, and
+camera, `./scripts/view_camera.sh --profile dp100` for alignment, a fitted
+`levels.json` (`./scripts/run_pv_pad.sh aim | capture | fit`), and
 `SO101_PV_PYTHON` pointing at the PressureVision environment. **Never substitute
 `python -m` for the wrappers** — defect #1 above is exactly that mistake.
 

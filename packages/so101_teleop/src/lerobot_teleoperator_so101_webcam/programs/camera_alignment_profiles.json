@@ -1,0 +1,14 @@
+{
+  "dp50": {
+    "description": "DP model trained on episodes 0-49. Camera/tag layout from early recording batch.",
+    "cube_target": [286, 118],
+    "tag_target": [421, 143],
+    "tolerance_px": 30
+  },
+  "dp100": {
+    "description": "DP/ACT models trained/evaluated on later camera layout, especially episodes 50-99.",
+    "cube_target": [320, 220],
+    "tag_target": [416, 297],
+    "tolerance_px": 30
+  }
+}
