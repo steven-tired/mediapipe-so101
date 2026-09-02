@@ -250,3 +250,16 @@ def test_undo_keeps_a_lift_boundary_the_tighten_ramp_recorded_itself():
          events=[(4.0, "set_tighten_off"), (6.0, "confirm_lift"), (8.0, "undo_lift")])
     assert protocol.lift_boundary is not None
     assert protocol.phase == "following"
+
+
+def test_a_floor_limited_lift_boundary_says_so():
+    """All six 2026-09-02 trials bottomed out, so their lift boundaries agreed
+    to sd 0.30 -- and that was the shared floor, not the physics."""
+    protocol = _protocol()
+    protocol.set_tighten(True)
+    _run(protocol, seconds=20.0, body_at=lambda t: STALLED,
+         events=[(18.0, "confirm_lift")])
+    assert protocol.tighten_ramp.reached_floor is True
+    label = protocol.update(t=20.0, policy_target=28.0, actual_pos=24.0,
+                            body_command=STALLED)[1]
+    assert label["lift_boundary_floor_limited"] is True

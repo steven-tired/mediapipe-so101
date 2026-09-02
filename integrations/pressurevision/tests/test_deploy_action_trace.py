@@ -1,5 +1,7 @@
 from collections import deque
 import json
+from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import torch
@@ -205,3 +207,49 @@ def test_read_present_positions_retries_one_transient_bus_failure():
 
     assert positions == {"shoulder": 1.5, "gripper": 95.0}
     assert bus.calls == 2
+
+
+def test_relax_reports_the_joint_it_could_not_release():
+    """A partial relax leaves some joints holding and some limp.
+
+    Worse than either, and silent: the operator lets go of an arm they were
+    told is limp.
+    """
+    import deploy_so101_grip_ee as deploy
+
+    class Bus:
+        motors = {"shoulder_pan": 1, "wrist_roll": 5, "gripper": 6}
+
+        def __init__(self):
+            self.written = []
+
+        def write(self, reg, motor, value, **kwargs):
+            if motor == "wrist_roll":
+                raise ConnectionError("no status packet")
+            self.written.append((reg, motor, value))
+
+    robot = SimpleNamespace(bus=Bus())
+    printed = []
+    with mock.patch.object(deploy.time, "sleep"), \
+         mock.patch("builtins.print", lambda *a, **k: printed.append(" ".join(map(str, a)))):
+        deploy.relax_all_joints(robot)
+
+    assert ("Torque_Enable", "shoulder_pan", 0) in robot.bus.written
+    assert ("Torque_Enable", "gripper", 0) in robot.bus.written
+    assert any("TORQUE STILL ON" in line and "wrist_roll" in line for line in printed)
+
+
+def test_relax_says_so_when_every_joint_released():
+    import deploy_so101_grip_ee as deploy
+
+    class Bus:
+        motors = {"shoulder_pan": 1, "gripper": 6}
+
+        def write(self, reg, motor, value, **kwargs):
+            pass
+
+    printed = []
+    with mock.patch.object(deploy.time, "sleep"), \
+         mock.patch("builtins.print", lambda *a, **k: printed.append(" ".join(map(str, a)))):
+        deploy.relax_all_joints(SimpleNamespace(bus=Bus()))
+    assert any("torque disabled on all joints" in line for line in printed)

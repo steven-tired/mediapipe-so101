@@ -586,6 +586,13 @@ class PairedBoundaryProtocol:
             "loosen_steps": self.loosen_steps,
             "at_ceiling": self.at_ceiling,
             "lift_boundary": self.lift_boundary,
+            # Whether the tighten ramp was still against its floor when this
+            # was taken. All six trials on 2026-09-02 were, so their
+            # lift_boundary values agreed to sd 0.30 -- and that agreement was
+            # the shared floor plus compliance, not a physical boundary. The
+            # ramp cannot resolve it anyway: 2.0 is the smallest resolvable
+            # tighten step and the window it has to land in is about 1.3.
+            "lift_boundary_floor_limited": self.tighten_ramp.reached_floor,
             "slip_onset_boundary": self.slip_onset_boundary,
             "drop_boundary": self.drop_boundary,
             "freeze_body": self.freeze_body,

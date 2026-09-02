@@ -1459,6 +1459,50 @@ The full contract is `--start-joints 1.32,-38.42,42.68,86.2,0.92,99.34
 must match the demo frame: cap to the right, blue nutrition panel facing the
 camera, near the front edge.
 
+## The lift boundary cannot be measured by tightening
+
+Six paired trials on 2026-09-02 produced lift boundaries of `24.20`, `24.26`,
+`24.26`, `24.46`, `24.59` and `24.98` -- sd `0.30`. That agreement is an
+artifact and was briefly written up as a physical constant, which it is not.
+
+**All six ramps bottomed out on the `22` floor.** The recorded value is the
+readback where the jaw settled against that floor plus its compliance creep, so
+the six values agree because the six floors were the same. What the trials
+actually establish is only that the carton does not lift near `26` and does
+lift somewhere at or below about `24.5`. The `1.5` in between is unmeasured.
+
+Tightening cannot close that gap. The smallest resolvable tighten step is `2.0`
+and delivery saturates near 38%, while the window the measurement has to land
+in is about `1.3` wide (see below). A finer tighten step does not buy
+resolution -- at `1.0` only five treads in six move -- it buys a stick-slip ramp
+whose reported depth is not where the jaw is.
+
+**The resolution is on the loosen side.** Loosening resolves `0.5` at about 90%
+delivery on a resting carton and 74% on a lifted one, which is four times finer
+than tightening. So the protocol is: tighten only to get the carton airborne,
+and take the measurement on the way back out. Tightening is no longer a
+measurement, and `lift_boundary` is recorded with
+`lift_boundary_floor_limited` beside it so a floor-limited value is never read
+as a boundary.
+
+### The usable window is about 1.3 degrees
+
+Across the four trials with a marked slip onset, the distance from the lift
+boundary to the onset was `0.79`, `1.25`, `1.38` and `4.20`, median `1.31`. If
+the objective is a grasp that does not scrape the carton, that interval is the
+target, and it is narrower than the tighten step that would have to hit it.
+
+Slip onset and drop are clearly separate events: onset-to-drop ran `0.46`,
+`1.05`, `1.84` and `2.95`. Two of six trials had no resolvable onset at all --
+one where a face never came up, one where both sides released at once -- so the
+onset is not present in every grasp and cannot be the only label.
+
+### ACT's own closure is not a constant
+
+Reported earlier as a deterministic `32.72`. That held for three trials with
+the carton in one place; moving it produced `26.56` and `29.97`. The closure
+tracks the scene, which is what a head needs it to do.
+
 ### Next gates after 2026-09-02
 
 Gate 1 is closed and gate 2 is implemented but unrun. Renumbering the rest

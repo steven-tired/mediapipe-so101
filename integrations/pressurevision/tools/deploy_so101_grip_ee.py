@@ -1013,6 +1013,37 @@ class DeploymentEvidence:
         self._closed = True
 
 
+def relax_all_joints(robot, *, warn_s: float = 3.0) -> None:
+    """Drop torque on every joint before disconnecting.
+
+    wrist_roll draws 12 to 16 counts and runs about 10 C hotter than its peers
+    while torque is on, and it intermittently stops answering the bus -- three
+    runs on 2026-09-02 died at connect on a missing id 5, and every time the
+    drops vanished the moment torque came off. Leaving the arm energised
+    between trials is what keeps it there.
+
+    The arm goes limp, so it falls, and it drops whatever it is holding. That
+    is the point of the operator stop, but it still gets the same warning and
+    countdown that so101_diag's relax gives.
+    """
+    print("** SUPPORT THE ARM -- torque is coming off and it will go LIMP. **")
+    print(f"   (Ctrl-C within {warn_s:g}s if you are not holding it.)")
+    time.sleep(warn_s)
+    failed = []
+    for motor in robot.bus.motors:
+        try:
+            robot.bus.write("Torque_Enable", motor, 0, normalize=False, num_retry=5)
+        except (OSError, RuntimeError) as exc:
+            failed.append(f"{motor}: {exc}")
+    if failed:
+        # Say which joint is still energised. A silent partial relax leaves the
+        # arm holding on some joints and limp on others, which is worse than
+        # either.
+        print("[relax] TORQUE STILL ON for: " + "; ".join(failed))
+    else:
+        print("[relax] torque disabled on all joints")
+
+
 def _apply_diffusion_overrides(policy, scheduler, steps, tag="deploy"):
     """Optionally swap the diffusion sampler and/or set denoising steps. DDIM samples well in
     ~10 steps even for a DDPM-trained model (DDPM itself needs ~100 -> slow). No effect on ACT."""
@@ -1409,6 +1440,7 @@ def main():
     paired_operator = None
     evidence = None
     connected = False
+    operator_stopped = False
     normal_exit = False
     run_status = "failed"
     run_error = None
@@ -1873,6 +1905,11 @@ def main():
         elapsed = time.perf_counter() - run_started
         active_elapsed = elapsed - paused_elapsed_s
         print(f"[deploy] done — {n} steps ({n / active_elapsed:.1f} Hz).")
+        operator_stopped = (
+            (paired_operator is not None and paired_operator.stop)
+            or (stall_operator is not None and stall_operator.stop)
+            or (grip_intervention is not None and grip_intervention.stop)
+        )
         normal_exit = True
         run_status = "complete"
     except KeyboardInterrupt:
@@ -1915,6 +1952,13 @@ def main():
                     else {
                         "phase": paired.phase,
                         "lift_boundary": paired.lift_boundary,
+                        # Read with this: a floor-limited value is the floor
+                        # plus compliance, not the depth the carton lifted at.
+                        # Tightening is only how the carton gets airborne; the
+                        # measurement is the loosen ramp, which resolves 0.5 at
+                        # 90% delivery against tightening's 2.0 at 38%.
+                        "lift_boundary_floor_limited": paired.tighten_ramp.reached_floor,
+                        "tighten_deepest_target": paired.tighten_ramp.deepest_target,
                         "slip_onset_boundary": paired.slip_onset_boundary,
                         "drop_boundary": paired.drop_boundary,
                         "loosen_steps": paired.loosen_steps,
@@ -1970,12 +2014,15 @@ def main():
                 )
             if paired is not None:
                 print(
-                    f"[paired] lift={paired.lift_boundary} "
+                    f"[paired] lift={paired.lift_boundary}"
+                    f"{' (FLOOR-LIMITED)' if paired.tighten_ramp.reached_floor else ''} "
                     f"slip_onset={paired.slip_onset_boundary} "
                     f"drop={paired.drop_boundary} "
                     f"loosen_steps={paired.loosen_steps}"
                 )
         if connected:
+            if operator_stopped:
+                relax_all_joints(robot)
             # disconnect with torque held (disable_torque_on_disconnect=False) so the arm keeps its pose.
             robot.disconnect()
 
