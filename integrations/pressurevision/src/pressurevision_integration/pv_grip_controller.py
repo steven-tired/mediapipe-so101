@@ -232,6 +232,9 @@ class PressureVisionGripRuntime:
                 cutoff_hz=float(contract["cutoff_hz"]),
                 stabilize=bool(contract["stabilize"]),
             )
+        self.last_range_input_active: bool | None = None
+        self.last_range_input_pressure: float | None = None
+        self.last_range_live_target: float | None = None
         self._range_target: float | None = None
         self._range_fallback_target = (
             None if self._range_mapper is None else self._range_mapper.release_pos
@@ -503,12 +506,24 @@ class PressureVisionGripRuntime:
         )
 
     def _update_range(self, base_gripper, pressure, current_command, observed_at_s):
+        # DIAGNOSTIC: read the two fields off the object the mapper is actually
+        # handed, at the moment it is handed them. A recorded session showed
+        # `pressure` = 1.0 and mapping status "active" in telemetry while the
+        # mapper's own closure stayed exactly 0.0, which an offline replay of the
+        # same inputs could not reproduce. These columns say which of the two
+        # readings is the true one.
+        self.last_range_input_active = bool(getattr(pressure, "active", False))
+        raw_input = getattr(pressure, "pressure_0_1", None)
+        self.last_range_input_pressure = None if raw_input is None else float(raw_input)
+
         self.last_relative_grip = self._range_mapper.update(
             base_gripper_pos=base_gripper,
             pressure=pressure,
             control_observed_at_s=observed_at_s,
         )
         live_target = self.last_relative_grip.target_pos
+        # The mapper's own answer, before the adjustment lock can override it.
+        self.last_range_live_target = live_target
         released = self.last_relative_grip.status == "right_grasp_inactive"
         previous_target = self._range_target
         if released:

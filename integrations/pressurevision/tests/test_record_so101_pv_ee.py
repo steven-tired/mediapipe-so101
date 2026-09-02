@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from pressurevision_integration.protocol import PressureReading
+
 recorder = importlib.import_module("record_so101_pv_ee")
 review = importlib.import_module("pressurevision_integration.pv_episode_review")
 
@@ -273,10 +275,12 @@ def test_transient_missing_operator_preview_does_not_invalidate_episode():
     teleop.invalid_reason = ""
     teleop.temperature_guard = recorder.TemperatureGuard()
     teleop.events = {"stop_recording": False, "exit_early": False}
+    teleop.pv_fault_release_deadline_s = None
 
     assert teleop.get_action() == {"gripper.pos": 42.0}
     assert teleop.episode_valid
     assert not teleop.events["stop_recording"]
+    assert teleop.pv_fault_release_deadline_s is None
 
 
 @pytest.mark.parametrize("key", [ord("r"), ord("R"), 81])
@@ -298,12 +302,22 @@ def test_recording_restart_key_discards_current_attempt(key):
 
 
 def test_locked_pv_teacher_uses_effective_latched_value_while_raw_pad_is_released():
-    reading = argparse.Namespace(
-        active=False,
-        available=True,
-        fresh=True,
-        status="baseline",
+    # A real PressureReading, not a Namespace shaped to whatever the code asked
+    # for. The provenance fields were read under four names the dataclass does
+    # not have (`pv_sequence`, `pv_sent_at_s`, `pv_received_at_s`,
+    # `thermal_observed_at_s`); a Namespace answers `getattr(..., None)` just as
+    # happily as the real object does, so every recorded episode got five
+    # constant-zero columns and this test stayed green.
+    reading = PressureReading(
         pressure_0_1=0.0,
+        active=False,
+        quality=1.0,
+        available=True,
+        status="baseline",
+        sequence=41,
+        observed_at_s=100.0,
+        sent_at_s=100.01,
+        received_at_s=100.02,
     )
     teleop = recorder.PVRecorderTeleop.__new__(recorder.PVRecorderTeleop)
     teleop.pv = argparse.Namespace(
@@ -315,6 +329,11 @@ def test_locked_pv_teacher_uses_effective_latched_value_while_raw_pad_is_release
 
     assert supervision[recorder.PV_TEACHER_FEATURE] == pytest.approx([0.5])
     assert supervision[recorder.PV_TEACHER_VALID_FEATURE] == pytest.approx([1.0])
+    # The provenance must reach the frame, not be defaulted away.
+    assert supervision[recorder.PV_SEQUENCE_FEATURE] == pytest.approx([41])
+    assert supervision[recorder.PV_SOURCE_TIMESTAMP_FEATURE] == pytest.approx([100.0])
+    assert supervision[recorder.PV_SENT_TIMESTAMP_FEATURE] == pytest.approx([100.01])
+    assert supervision[recorder.PV_RECEIVED_TIMESTAMP_FEATURE] == pytest.approx([100.02])
 
 
 def test_rerecord_discards_buffer_before_building_review_artifacts():
@@ -1115,3 +1134,131 @@ def test_the_recorder_parks_on_the_right_v_not_a_left_fist():
     source = inspect.getsource(recorder.run_recording)
 
     assert 'middle_gesture="right_v"' in source
+
+
+def test_the_mapping_contract_is_written_into_the_dataset(tmp_path):
+    """Schema v7 claims a recorded grip is reproducible from the episode alone.
+
+    It was written only into the evidence directory's manifest. A dataset copied
+    or uploaded on its own carried a teacher column with no scale attached: the
+    release / zero / one positions and the filter cutoff all lived elsewhere.
+    """
+    contract = {
+        "mapping": "carton_span",
+        "release_pos": 100.0,
+        "pressure_zero_pos": 32.0,
+        "pressure_one_pos": 20.0,
+        "cutoff_hz": 1.0,
+        "stabilize": False,
+    }
+
+    written = recorder.write_dataset_mapping_contract(tmp_path, contract)
+
+    assert written == tmp_path / "meta" / recorder.DATASET_MAPPING_CONTRACT_NAME
+    assert json.loads(written.read_text()) == contract
+
+
+def test_a_run_without_a_contract_writes_nothing(tmp_path):
+    """The mappings that predate the range mapper must not leave an empty file."""
+    assert recorder.write_dataset_mapping_contract(tmp_path, None) is None
+    assert not (tmp_path / "meta" / recorder.DATASET_MAPPING_CONTRACT_NAME).exists()
+
+
+def test_the_recorder_writes_the_contract_before_the_first_episode():
+    """Writing it at finalize would lose it on a run that crashes mid-episode."""
+    source = inspect.getsource(recorder.run_recording)
+    write = source.index("write_dataset_mapping_contract(")
+    first_save = source.index("dataset.save_episode()")
+    assert write < first_save
+
+
+class _ReleaseRobot:
+    """Minimal follower double: remembers the last action and whether it closed."""
+
+    def __init__(self, *, connected=True, gripper=22.0, raise_on_send=False):
+        self.is_connected = connected
+        self.gripper = gripper
+        self.raise_on_send = raise_on_send
+        self.actions = []
+
+    def get_observation(self):
+        return {
+            "shoulder_pan.pos": 1.0,
+            "shoulder_lift.pos": 2.0,
+            "elbow_flex.pos": 3.0,
+            "wrist_flex.pos": 4.0,
+            "wrist_roll.pos": 5.0,
+            "gripper.pos": self.gripper,
+            "observation.images.front": object(),
+        }
+
+    def send_action(self, action):
+        if self.raise_on_send:
+            raise ConnectionError("bus went away")
+        self.actions.append(dict(action))
+
+
+def test_the_gripper_is_opened_before_the_bus_closes(monkeypatch):
+    """Torque-off does not open the jaw; gear friction keeps the object held.
+
+    A session ending mid-grasp -- ESC, a PV fault, an exception -- used to leave
+    the carton clamped until someone pried it out.
+    """
+    monkeypatch.setattr(recorder.time, "sleep", lambda seconds: None)
+    robot = _ReleaseRobot(gripper=22.0)
+
+    assert recorder.release_gripper_before_disconnect(robot) is True
+
+    assert len(robot.actions) == 1
+    action = robot.actions[0]
+    assert action["gripper.pos"] == recorder.SHUTDOWN_RELEASE_POS
+    # The other joints are held where they are: this is a release, not a move.
+    assert action["shoulder_pan.pos"] == 1.0
+    assert action["elbow_flex.pos"] == 3.0
+    assert "observation.images.front" not in action
+
+
+def test_a_disconnected_robot_is_left_alone(monkeypatch):
+    monkeypatch.setattr(recorder.time, "sleep", lambda seconds: None)
+    robot = _ReleaseRobot(connected=False)
+
+    assert recorder.release_gripper_before_disconnect(robot) is False
+    assert robot.actions == []
+
+
+def test_a_failing_release_never_masks_the_original_failure(monkeypatch):
+    """It runs on teardown paths that are already handling an error."""
+    monkeypatch.setattr(recorder.time, "sleep", lambda seconds: None)
+    robot = _ReleaseRobot(raise_on_send=True)
+
+    assert recorder.release_gripper_before_disconnect(robot) is False
+
+
+def test_the_release_runs_before_the_disconnect():
+    """ExitStack unwinds in reverse: the release must be registered second."""
+    source = inspect.getsource(recorder.run_recording)
+    disconnect = source.index("resources.callback(disconnect_robot_safely, robot)")
+    release = source.index("resources.callback(release_gripper_before_disconnect, robot)")
+    assert disconnect < release, (
+        "the release is registered after the disconnect, so it would run first "
+        "and the bus would still be closed on a clamped gripper"
+    )
+
+
+def test_a_frame_before_the_first_pv_packet_still_builds_a_row():
+    """`reading` is None until the sender's first packet lands.
+
+    Switching the provenance fields from `getattr(..., None)` to named access
+    fixed five constant-zero columns and broke this: the recorder crashed on the
+    first frame of the next session, mid-episode, on a connected robot.
+    """
+    supervision = recorder.pv_supervision_from_reading(None)
+
+    assert supervision[recorder.PV_TEACHER_VALID_FEATURE] == pytest.approx([0.0])
+    assert supervision[recorder.PV_SEQUENCE_FEATURE] == pytest.approx([0])
+    assert supervision[recorder.PV_SOURCE_TIMESTAMP_FEATURE] == pytest.approx([0.0])
+    # Every feature this function owns must be present, or the schema breaks.
+    # (human_intervention is contributed elsewhere, not here.)
+    for feature in (recorder.PV_TEACHER_FEATURE, recorder.PV_TEACHER_VALID_FEATURE,
+                    *recorder.PV_TIMING_FEATURES):
+        assert feature in supervision

@@ -21,6 +21,7 @@ packet's timestamp and age. `roi_mode` is what tells the two apart.
 from __future__ import annotations
 
 import socket
+import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -229,6 +230,93 @@ def offset_quality(off_x: float, off_y: float, cfg: PressureVisionConfig) -> flo
     if span <= 0.0:
         return 0.0
     return float(np.clip(1.0 - (radius - cfg.trust_full_offset) / span, 0.0, 1.0))
+
+
+class FrameUnavailableError(RuntimeError):
+    """No sample is available yet, or the producer has retired."""
+
+
+class LatestFrameSource:
+    """Publish the newest sample from a blocking source without blocking consumers.
+
+    Generic over the sample type: here it wraps PressureVisionUDPSource, whose
+    `read()` blocks until a datagram arrives, so the control loop reads the most
+    recent packet instead of waiting on the socket.
+
+    It reached this repo late. The migration filed it under a file named
+    `ir_capture.py` and therefore sent it to the private IR repo, while the PV
+    recorder here kept importing it -- which the public repo may not do, the
+    dependency running one way only. Nothing in the class is IR-specific. The
+    private repo keeps its own copy for its own capture line.
+    """
+
+    _CLOSE_TIMEOUT_S = 1.0
+
+    def __init__(self, source):
+        self.source = source
+        self._lock = threading.Lock()
+        self._latest = None
+        self._error: Exception | None = None
+        self._running = True
+        self._closed = False
+        self._source_close_called = False
+        self._source_close_error: Exception | None = None
+        self._thread = threading.Thread(target=self._produce, daemon=True)
+        self._thread.start()
+
+    def _produce(self) -> None:
+        while True:
+            with self._lock:
+                if not self._running:
+                    return
+            try:
+                sample = self.source.read()
+            except Exception as exc:
+                with self._lock:
+                    if self._running:
+                        self._error = exc
+                return
+            with self._lock:
+                if not self._running:
+                    return
+                self._latest = sample
+
+    def read(self):
+        with self._lock:
+            if not self._running:
+                raise FrameUnavailableError("latest frame source is closed")
+            if self._error is not None:
+                raise self._error
+            if self._latest is None:
+                raise FrameUnavailableError("latest frame unavailable before first producer sample")
+            return self._latest
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._running = False
+            close_source = not self._source_close_called
+            self._source_close_called = True
+
+        if close_source:
+            close = getattr(self.source, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:
+                    self._source_close_error = exc
+
+        self._thread.join(timeout=self._CLOSE_TIMEOUT_S)
+        if self._thread.is_alive():
+            raise RuntimeError(
+                f"latest frame producer thread did not terminate within {self._CLOSE_TIMEOUT_S:.1f}s"
+            ) from self._source_close_error
+        if self._source_close_error is not None:
+            raise self._source_close_error
+
+        with self._lock:
+            self._closed = True
 
 
 class PressureVisionUDPSource:

@@ -74,6 +74,9 @@ PV_SHADOW_FIELDS = (
     "relative_track_hold_state",
     "relative_track_hold_residual",
     "relative_track_hold_output",
+    "range_input_active",
+    "range_input_pressure_0_1",
+    "range_live_target",
 )
 
 
@@ -97,6 +100,9 @@ class PVShadowTelemetrySample(ShadowTelemetrySample):
     relative_track_hold_state: str | None = None
     relative_track_hold_residual: float | None = None
     relative_track_hold_output: float | None = None
+    range_input_active: bool | None = None
+    range_input_pressure_0_1: float | None = None
+    range_live_target: float | None = None
     pv_adjustment_state: str | None = None
     pv_adjustment_event: str | None = None
     pv_adjustment_anchor_target: float | None = None
@@ -158,6 +164,9 @@ def pv_shadow_row(sample, *, pressure, motor_telemetry, finalized_at_s) -> dict:
         "relative_reference_pos": getattr(sample, "relative_reference_pos", None),
         "relative_closure": getattr(sample, "relative_closure", None),
         "relative_mapping_status": getattr(sample, "relative_mapping_status", None),
+        "range_input_active": getattr(sample, "range_input_active", None),
+        "range_input_pressure_0_1": getattr(sample, "range_input_pressure_0_1", None),
+        "range_live_target": getattr(sample, "range_live_target", None),
         "relative_track_hold_state": getattr(sample, "relative_track_hold_state", None),
         "relative_track_hold_residual": getattr(sample, "relative_track_hold_residual", None),
         "relative_track_hold_output": getattr(sample, "relative_track_hold_output", None),
@@ -254,6 +263,9 @@ def pv_shadow_sample(
         relative_reference_pos=getattr(relative, "reference_pos", None),
         relative_closure=getattr(relative, "relative_closure", None),
         relative_mapping_status=getattr(relative, "status", None),
+        range_input_active=getattr(runtime, "last_range_input_active", None),
+        range_input_pressure_0_1=getattr(runtime, "last_range_input_pressure", None),
+        range_live_target=getattr(runtime, "last_range_live_target", None),
         relative_track_hold_state=getattr(track_hold, "state", None),
         relative_track_hold_residual=getattr(track_hold, "robust_residual", None),
         relative_track_hold_output=getattr(track_hold, "output_value", None),

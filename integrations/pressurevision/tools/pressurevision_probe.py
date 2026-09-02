@@ -71,12 +71,40 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def load_model(repo: Path, device: str):
+PV_REPO_ENV = "SO101_PV_REPO"
+
+
+def resolve_repo(repo: Path | None) -> Path:
+    """Locate the released PressureVision checkout holding config/ and weights.
+
+    The checkout is an external upstream clone, not vendored here, so this repo
+    carries no default path to it -- the migration dropped the old hardcoded
+    /home/... default and nothing replaced it, which left every program that
+    loads the network dying on `None / "config/paper.yml"` at startup. An
+    explicit --repo wins; otherwise the environment names it.
+    """
+    if repo is not None:
+        return Path(repo)
+    from os import environ
+
+    named = environ.get(PV_REPO_ENV)
+    if not named:
+        raise SystemExit(
+            f"no PressureVision checkout: pass --repo or set {PV_REPO_ENV} to the "
+            "clone holding config/paper.yml and data/model/paper_59.pt"
+        )
+    return Path(named)
+
+
+def load_model(repo: Path | None, device: str):
     """Build the released architecture directly.
 
     `prediction.model_builder.build_model` imports the dataset loader, which
     needs PressureVisionDB on disk; the probe only needs the weights.
     """
+    repo = resolve_repo(repo)
+    if not (repo / "config/paper.yml").is_file():
+        raise SystemExit(f"{repo}: not a PressureVision checkout (no config/paper.yml)")
     sys.path.insert(0, str(repo))
     import segmentation_models_pytorch as smp
     import yaml

@@ -73,6 +73,7 @@ from pressurevision_integration.pv_object_profile import (
     object_profile_sha256,
 )
 from pressurevision_integration.pv_pressure import (
+    LatestFrameSource,
     PressureVisionSource,
     PressureVisionUDPSource,
 )
@@ -593,10 +594,23 @@ def pv_supervision_from_reading(
     if not np.isfinite(value) or not 0.0 <= value <= 1.0:
         valid, value = False, 0.0
 
-    source_t = getattr(reading, "thermal_observed_at_s", None)
-    sent_t = getattr(reading, "pv_sent_at_s", None)
-    received_t = getattr(reading, "pv_received_at_s", None)
-    sequence = getattr(reading, "pv_sequence", None)
+    # PressureReading's own field names. These were read as `thermal_observed_at_s`,
+    # `pv_sent_at_s`, `pv_received_at_s` and `pv_sequence` -- none of which the
+    # dataclass has, three of them left over from the IR line. `getattr(..., None)`
+    # returned None every frame, so the sequence, all three timestamps and the
+    # derived frame age were written to every recorded episode as a constant 0.0:
+    # five of the seven PV columns, silently. The sender was numbering packets
+    # 298..918 the whole time.
+    # `reading` is None until the first PV packet arrives, which the validity
+    # check above already accounts for. Named access is deliberate for the rest:
+    # it is what makes a wrong field name fail loudly instead of defaulting.
+    if reading is None:
+        source_t = sent_t = received_t = sequence = None
+    else:
+        source_t = reading.observed_at_s
+        sent_t = reading.sent_at_s
+        received_t = reading.received_at_s
+        sequence = reading.sequence
     frame_t = time.time() if observed_at_s is None else float(observed_at_s)
     source_t = 0.0 if source_t is None else float(source_t)
     return {
@@ -616,6 +630,26 @@ def pv_supervision_from_reading(
             [0 if sequence is None else int(sequence)], dtype=np.int64
         ),
     }
+
+
+DATASET_MAPPING_CONTRACT_NAME = "pv_mapping_contract.json"
+
+
+def write_dataset_mapping_contract(dataset_root: Path, contract) -> Path | None:
+    """Record the PV mapping contract inside the dataset's own meta/ directory.
+
+    Returns the path written, or None when the run has no contract (the mappings
+    that predate the range mapper). Rewriting it on every run is deliberate: an
+    append to an existing dataset under a *different* contract would otherwise be
+    invisible, and this makes the mismatch checkable.
+    """
+    if contract is None:
+        return None
+    meta_dir = Path(dataset_root) / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    path = meta_dir / DATASET_MAPPING_CONTRACT_NAME
+    path.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
 
 
 class EvidenceSession:
@@ -916,6 +950,51 @@ class ResilientSOFollower(SOFollower):
                 if attempt == 7:
                     raise
                 time.sleep(0.003)
+
+
+#: Where the gripper is sent on the way out. Torque-off alone does not open it:
+#: the jaw is held by gear friction, so a session that ends mid-grasp -- ESC, a
+#: PV fault, an exception -- leaves the object clamped. One deterministic open
+#: command before the bus closes is what actually lets go.
+SHUTDOWN_RELEASE_POS = 100.0
+SHUTDOWN_RELEASE_SETTLE_S = 0.6
+
+
+def release_gripper_before_disconnect(
+    robot,
+    *,
+    position: float = SHUTDOWN_RELEASE_POS,
+    settle_s: float = SHUTDOWN_RELEASE_SETTLE_S,
+) -> bool:
+    """Command the gripper open and give it time to move. Never raises.
+
+    Best effort by design: this runs on every exit path including the ones that
+    are already handling a failure, so it must not replace the original error
+    with one of its own. Returns whether the command was actually sent.
+    """
+    if not getattr(robot, "is_connected", False):
+        return False
+    try:
+        action = {
+            key: float(value)
+            for key, value in _read_positions(robot).items()
+        }
+    except Exception as exc:
+        print(f"[cleanup] could not read pose before releasing the gripper: {exc}")
+        return False
+    if "gripper.pos" not in action:
+        return False
+    action["gripper.pos"] = float(position)
+    try:
+        robot.send_action(action)
+    except Exception as exc:
+        print(f"[cleanup] gripper release command failed: {exc}")
+        return False
+    # Hold the other joints where they are while the jaw travels; disconnecting
+    # immediately would cut torque before the gripper has moved.
+    time.sleep(settle_s)
+    print(f"[cleanup] gripper released to {position:.0f} before disconnect.")
+    return True
 
 
 def disconnect_robot_safely(robot) -> None:
@@ -1332,8 +1411,6 @@ def _ramp_to(robot, target: dict, *, steps: int = 30) -> None:
 def _build_pressure_source(port: int):
     # The UDP socket/thread is intentionally opened only after validate_config has returned.
     udp = PressureVisionUDPSource(port=port)
-    from lerobot_teleoperator_so101_webcam.ir_capture import LatestFrameSource
-
     latest = LatestFrameSource(udp)
     return PressureVisionSource(source=latest)
 
@@ -1497,7 +1574,10 @@ def run_recording(args: argparse.Namespace) -> int:
             grip_context=checked["grip_context"],
         )
         with ExitStack() as resources:
+            # Registered first, so it runs LAST -- after every other teardown and
+            # immediately before the bus is closed by disconnect_robot_safely.
             resources.callback(disconnect_robot_safely, robot)
+            resources.callback(release_gripper_before_disconnect, robot)
             if not args.no_oak:
                 # DepthAI startup blocks on this host when both workspace UVC
                 # streams are already active. Boot OAK before robot.connect()
@@ -1604,6 +1684,12 @@ def run_recording(args: argparse.Namespace) -> int:
                     use_videos=True,
                     image_writer_threads=4,
                 )
+            # The mapping contract travels WITH the dataset, not only in the
+            # evidence directory beside it. Schema v7's claim is that a recorded
+            # grip can be reproduced from the episode alone; without the release
+            # / zero / one positions and the filter cutoff, the teacher column is
+            # a number with no scale. The evidence manifest keeps its own copy.
+            write_dataset_mapping_contract(dataset_root, pv.mapping_contract)
             recording_dataset = PVTeachingDatasetView(dataset, teleop)
             resources.callback(dataset.finalize)
             teleop.connect()
