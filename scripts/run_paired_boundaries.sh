@@ -12,17 +12,38 @@
 # measured deadband a ramp advances in stick-slip bursts and the depth it
 # reports is not the depth the jaw is at.
 #
-# Usage: TRIAL=01 ./scripts/run_paired_boundaries.sh [extra deploy args]
+# Usage: ./scripts/run_paired_boundaries.sh [extra deploy args]
+#        TRIAL=07 ./scripts/run_paired_boundaries.sh    # pin the number
+# With TRIAL unset the next free number for today is used, so a run that failed
+# before it wrote anything simply reuses its number instead of leaving a hole.
 # The arm moves on its own. Keep the e-stop within reach.
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 export PYTHONPATH="$REPO/integrations/pressurevision/tools:$PYTHONPATH"
 
-: "${TRIAL:?set TRIAL to the trial number, e.g. TRIAL=01}"
 : "${SO101_GRIP_POLICY:?set SO101_GRIP_POLICY to the pretrained_model directory of the checkpoint}"
 
 EVIDENCE_ROOT="${SO101_EVIDENCE_DIR:-$REPO/local/evidence}"
-OUT="$EVIDENCE_ROOT/phase_c_recovery_minimal/paired_boundary_trial${TRIAL}_$(date +%Y%m%d)"
+GROUP="$EVIDENCE_ROOT/phase_c_recovery_minimal"
+STAMP="$(date +%Y%m%d)"
+
+if [ -z "${TRIAL:-}" ]; then
+  # First number with no directory. Scanning beats "highest + 1" because a
+  # connection that dropped before the run wrote anything leaves no directory,
+  # and its number should be reused rather than skipped.
+  n=1
+  while [ -e "$GROUP/paired_boundary_trial$(printf '%02d' "$n")_$STAMP" ]; do
+    n=$((n + 1))
+    if [ "$n" -gt 99 ]; then
+      echo "run_paired_boundaries: 99 trials already recorded for $STAMP" >&2
+      exit 1
+    fi
+  done
+  TRIAL="$(printf '%02d' "$n")"
+fi
+
+OUT="$GROUP/paired_boundary_trial${TRIAL}_$STAMP"
+echo "[paired] trial $TRIAL -> $OUT"
 
 # No hide_gpu: this runs a policy.
 # The fixed-middle physical contract (TRAINING_HANDOFF, "Fixed-middle labeled
