@@ -318,6 +318,7 @@ class WebcamEEController:
             self.roll_ref = None
             self.smoothed = None
             self.gripper.reset()
+            self._disarm_gripper(pinch, wrist, transition="middle")
             self.cmd_state = dict(self.middle_pose)
             return dict(self.middle_pose), "MIDDLE"
 
@@ -352,4 +353,27 @@ class WebcamEEController:
             self.cmd_state = dict(joint_act)
             return joint_act, "MOVING"
 
+        # No command this frame. A gripper that measures the world has to be
+        # told: the hand left, so whatever zero it calibrated against may no
+        # longer hold. Continuing from a stale baseline is how a sensor keeps
+        # commanding force against a scene it can no longer see.
+        self._disarm_gripper(pinch, wrist, transition="hold")
         return None, "HOLD"
+
+    def _disarm_gripper(self, pinch, wrist, *, transition: str) -> None:
+        """Tell a sensing gripper this frame produced no command. Optional hook."""
+        disarm = getattr(self.gripper, "disarm", None)
+        if disarm is None:
+            return
+        severity = 1.0 - raw_grip_from_pinch(pinch, self.cfg, grip_map=self.grip_map) / 100.0
+        disarm(
+            GripInput(
+                grasp_active=False,
+                explicit_release=False,
+                severity=severity,
+                valid=True,
+                observed_at_s=wrist.observed_at_s if hasattr(wrist, "observed_at_s") else 0.0,
+            ),
+            self.cmd_state.get("gripper.pos", 50.0),
+            transition=transition,
+        )

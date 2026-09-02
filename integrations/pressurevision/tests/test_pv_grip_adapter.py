@@ -205,6 +205,19 @@ def _controller(gripper):
     return controller
 
 
+def _step_invalid(controller, *, pinch=0.03):
+    """A frame with no usable hand: the controller returns HOLD."""
+    points = [[0.0, 0.0, 0.0] for _ in range(21)]
+    points[8] = [pinch, 0.0, 0.0]
+    wrist = WristData(
+        position=np.zeros(3),
+        quaternion=np.array([0.0, 0.0, 0.0, 1.0]),
+        fist_state="open",
+        valid=False,
+    )
+    return controller.step(wrist, LandmarksData(landmarks=points, valid=False))
+
+
 def _step(controller, *, pinch=0.03, clutch=False):
     points = [[0.0, 0.0, 0.0] for _ in range(21)]
     points[8] = [pinch, 0.0, 0.0]
@@ -302,3 +315,69 @@ def test_a_sender_that_dies_mid_grasp_holds_rather_than_reverting_to_pinch():
     assert adapter.runtime.last_pressure_control.fault_latched
     # The pinch path would have commanded ~0 here (pinch 0.03, overdrive 18).
     assert joints["gripper.pos"] > 10.0
+
+
+# --- losing the hand expires the baseline ---
+
+def test_losing_tracking_disarms_pv_until_it_earns_a_new_baseline():
+    """Migrated from the worktree controller tests. The hand leaving means the
+    zero PV calibrated against may no longer hold, so PV has to re-earn control
+    rather than resume on a stale baseline."""
+    source = FakeSource()
+    adapter = _adapter(source)
+    controller = _controller(adapter)
+    for _ in range(12):
+        _step(controller)
+    assert adapter.runtime.pressure_state == "armed"
+
+    joints, state = _step_invalid(controller)
+
+    assert joints is None and state == "HOLD"
+    assert adapter.runtime.pressure_state == "disarmed"
+    assert adapter.runtime.last_pressure_control.reason == "hold"
+
+
+def test_a_disarmed_runtime_tracks_the_pinch_path_until_a_baseline_arrives():
+    """Disarmed is not "PV in charge with stale numbers": until a fresh
+    baseline lands the command follows the operator's pinch."""
+    adapter = _adapter(FakeSource(baseline_frames=1))
+    controller = _controller(adapter)
+    for _ in range(12):
+        _step(controller)
+    _step_invalid(controller)
+
+    for _ in range(12):
+        joints, _ = _step(controller)
+
+    assert adapter.runtime.pressure_state == "disarmed"
+    # pinch 0.03 -> a base command of 10; PV is not driving it.
+    assert joints["gripper.pos"] == pytest.approx(10.0, abs=0.5)
+
+
+def test_the_clutch_disarms_as_well_as_resetting():
+    adapter = _adapter(FakeSource())
+    controller = _controller(adapter)
+    for _ in range(12):
+        _step(controller)
+
+    _step(controller, clutch=True)
+
+    assert adapter.runtime.pressure_state == "disarmed"
+    assert adapter.runtime.last_pressure_control.reason == "middle"
+
+
+def test_a_sender_that_raises_on_reset_is_recorded_not_propagated():
+    """A disarm happens on a frame that is already going wrong. It must not be
+    the thing that takes the loop down."""
+
+    class BadReset(FakeSource):
+        def reset(self):
+            raise RuntimeError("reset failed")
+
+    adapter = _adapter(BadReset())
+    controller = _controller(adapter)
+    _step(controller)
+
+    _step_invalid(controller)
+
+    assert adapter.runtime.last_pressure_control.reason.startswith("pressure_reset_error")

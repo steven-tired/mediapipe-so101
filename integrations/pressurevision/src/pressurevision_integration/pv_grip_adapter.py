@@ -43,6 +43,30 @@ class PVGripAdapter:
         self._frame = None
         self.current_command = None
 
+    # -- the controller's optional disarm hook --------------------------------
+
+    def disarm(self, grip: GripInput, actual_pos: float, *, transition: str) -> None:
+        """The hand is gone: expire the baseline and make PV re-earn control.
+
+        A grasp the operator has walked away from must not resume from the zero
+        PV calibrated before they left -- the object may have been put down, the
+        hand may have moved on the pad, and the sensor would not know. Rearming
+        costs one baseline frame; not rearming costs force applied against a
+        scene the sensor can no longer see. This is the behaviour the episodes
+        under `local/evidence/` were recorded with.
+        """
+        self._frame = None
+        self.current_command = None
+        self.runtime.reset_mappers(event=f"{transition}_reset")
+        reason = self.runtime.reset_pressure_source()
+        severity = 0.0 if grip.severity is None else float(grip.severity)
+        self.runtime.reset_control(
+            (1.0 - severity) * 100.0,
+            float(actual_pos),
+            transition,
+            reason=reason,
+        )
+
     def step(self, grip: GripInput, actual_pos: float) -> float:
         # Explicit release is MediaPipe's alone. It must work with the PV sender
         # dead, so it never consults the runtime.
