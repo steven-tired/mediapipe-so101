@@ -278,6 +278,145 @@ def serialize_telemetry_snapshot(
     }
 
 
+@dataclass(frozen=True)
+class DeadbandStep:
+    """One commanded step of a deadband staircase and what the jaw actually did."""
+
+    step_size: float
+    commanded_delta: float
+    readback_delta: float
+    readback_spread: float
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.step_size) or self.step_size <= 0.0:
+            raise ValueError("step_size must be positive and finite")
+
+
+def readback_spread(samples: list[TelemetrySnapshot]) -> float:
+    """Peak-to-peak gripper readback across a dwell.
+
+    Peak-to-peak rather than a standard deviation because this encoder is
+    quantized and its hold noise is frequently exactly zero: what "resolvable"
+    means here is "larger than anything the jaw does while the command is
+    held", and that is a range, not a spread around a mean.
+    """
+    if not samples:
+        raise ValueError("readback_spread needs at least one sample")
+    positions = [float(sample.gripper_pos) for sample in samples]
+    return max(positions) - min(positions)
+
+
+def _tread_moved(step: DeadbandStep, noise_floor: float) -> bool:
+    """Did this one tread move the jaw, the way it was told to, past the floor?
+
+    A response of the right size in the wrong direction is the carton settling
+    or the jaw unloading, not the step being resolved.
+    """
+    return (
+        abs(step.readback_delta) > noise_floor
+        and step.readback_delta * step.commanded_delta > 0.0
+    )
+
+
+def smallest_resolvable_step(
+    steps: list[DeadbandStep],
+    *,
+    noise_floor: float,
+) -> float | None:
+    """Smallest swept size that moved the jaw on *every* tread of its ramp.
+
+    Every tread, not any tread, and this is the whole point of the gate. A ramp
+    stepped below the breakout deadband still advances -- it just advances in
+    stick-slip bursts, several dead treads and then a jump, because it is the
+    *accumulated* command error that eventually breaks static friction, not the
+    step. Scoring "any tread moved" would therefore certify the very `0.2` step
+    that moved nothing in the 2026-08-31 trials, given enough treads.
+
+    A ramp controller needs the other property: that each commanded step buys a
+    proportional amount of jaw. Returns `None` when no swept size had it, which
+    is a result and not an error.
+    """
+    if not math.isfinite(noise_floor) or noise_floor < 0.0:
+        raise ValueError("noise_floor must be non-negative and finite")
+    by_size: dict[float, list[DeadbandStep]] = {}
+    for step in steps:
+        by_size.setdefault(step.step_size, []).append(step)
+    resolved = [
+        size
+        for size, group in by_size.items()
+        if all(_tread_moved(step, noise_floor) for step in group)
+    ]
+    return min(resolved) if resolved else None
+
+
+def breakout_offset(steps: list[DeadbandStep], *, noise_floor: float) -> float | None:
+    """Commanded travel accumulated before the jaw first moved, along one ramp.
+
+    This is the deadband itself, in the units the servo is commanded in, and
+    unlike a step size it should not depend much on how the ramp was walked.
+    `None` means the ramp never broke out within the treads it was given.
+    """
+    accumulated = 0.0
+    for step in steps:
+        accumulated += step.commanded_delta
+        if _tread_moved(step, noise_floor):
+            return abs(accumulated)
+    return None
+
+
+def tracking_ratio(steps: list[DeadbandStep]) -> float:
+    """Jaw travel actually delivered per unit of commanded travel along a ramp.
+
+    One is a ramp that goes where it is told. Near zero is a ramp being
+    swallowed by the deadband. Above one is a ramp that stuck and then released
+    what it had stored.
+    """
+    if not steps:
+        raise ValueError("tracking_ratio needs at least one tread")
+    commanded = sum(abs(step.commanded_delta) for step in steps)
+    if commanded == 0.0:
+        raise ValueError("tracking_ratio needs a ramp that commanded some travel")
+    return sum(abs(step.readback_delta) for step in steps) / commanded
+
+
+def rank_correlation(xs: list[float], ys: list[float]) -> float:
+    """Spearman correlation with tie-averaged ranks.
+
+    Ties are averaged rather than broken because `Present_Load` is quantized to
+    multiples of four and `Present_Current` spans about sixteen counts, so a
+    tie-breaking rank would read structure into what is really one value.
+    Returns 0.0 when either channel is constant, which is the honest answer for
+    "does this channel respond to grip depth": it does not.
+    """
+    if len(xs) != len(ys):
+        raise ValueError("rank_correlation needs equal-length inputs")
+    if len(xs) < 2:
+        raise ValueError("rank_correlation needs at least two points")
+    rx, ry = _average_ranks(xs), _average_ranks(ys)
+    mx, my = mean(rx), mean(ry)
+    dx = [r - mx for r in rx]
+    dy = [r - my for r in ry]
+    denominator = math.sqrt(sum(d * d for d in dx) * sum(d * d for d in dy))
+    if denominator == 0.0:
+        return 0.0
+    return sum(a * b for a, b in zip(dx, dy)) / denominator
+
+
+def _average_ranks(values: list[float]) -> list[float]:
+    order = sorted(range(len(values)), key=lambda i: float(values[i]))
+    ranks = [0.0] * len(values)
+    start = 0
+    while start < len(order):
+        stop = start
+        while stop + 1 < len(order) and float(values[order[stop + 1]]) == float(values[order[start]]):
+            stop += 1
+        shared = (start + stop) / 2.0
+        for index in order[start : stop + 1]:
+            ranks[index] = shared
+        start = stop + 1
+    return ranks
+
+
 def choose_three_grip_targets(records: list[dict[str, float]], min_current_gap: float) -> dict[str, float]:
     ordered = sorted(records, key=lambda record: record["mean_current"])
     selected: tuple[dict[str, float], dict[str, float], dict[str, float]] | None = None
