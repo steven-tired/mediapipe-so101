@@ -243,6 +243,14 @@ class StallTightenRamp:
         self.at_floor = False
         self.lift_boundary: float | None = None
         self._last_step_at_s: float | None = None
+        # What the ramp did over the whole run, which is not what it is doing
+        # now. `_release()` clears the live fields the moment the stall breaks
+        # -- that is, on exactly the trials where the ramp worked -- so a
+        # summary read from those at the end would report every successful
+        # trial as having tightened nothing.
+        self.total_steps_applied = 0
+        self.deepest_target: float | None = None
+        self.reached_floor = False
 
     def update(self, *, t: float, policy_target: float, actual_pos: float, body_command):
         """Return the gripper target to command, and what was decided."""
@@ -287,10 +295,14 @@ class StallTightenRamp:
         stepped = self.target - self.config.step
         if stepped < self.config.floor_pos:
             self.at_floor = True
+            self.reached_floor = True
             return self.target, self._label(stall, "at_floor", 0.0)
         delta = stepped - self.target
         self.target = stepped
         self.steps_applied += 1
+        self.total_steps_applied += 1
+        if self.deepest_target is None or stepped < self.deepest_target:
+            self.deepest_target = stepped
         return self.target, self._label(stall, "tighten", delta)
 
     def _release(self) -> None:

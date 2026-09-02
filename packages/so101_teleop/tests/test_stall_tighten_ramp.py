@@ -151,3 +151,27 @@ def test_the_detector_rejects_a_changing_command_width():
         detector.update(t=0.1, body_command=[1.0, 2.0, 3.0])
     with pytest.raises(ValueError):
         BodyStallDetector().update(t=0.0, body_command=[])
+
+
+def test_the_run_summary_survives_the_handback():
+    """The fields the outcome is read from must not be the live ones.
+
+    `_release()` clears steps_applied and target the moment the stall breaks --
+    that is, on exactly the trials where the ramp worked -- so a summary read
+    from those would report every successful trial as having tightened nothing.
+    """
+    ramp = StallTightenRamp(_config(floor_pos=5.0), stall=StallConfig(window_s=2.0))
+    _run(ramp, seconds=8.0, body_at=lambda t: STALLED if t < 5.0 else lifting(t - 5.0))
+
+    assert ramp.steps_applied == 0, "the live counter is cleared on handback"
+    assert ramp.target is None
+    assert ramp.total_steps_applied == 6
+    assert ramp.deepest_target == pytest.approx(28.0 - 6 * 2.0)
+    assert ramp.lift_boundary is not None
+
+
+def test_the_deepest_target_is_the_squeeze_the_carton_took():
+    ramp = StallTightenRamp(_config(floor_pos=25.0), stall=StallConfig(window_s=2.0))
+    _run(ramp, seconds=8.0, body_at=lambda t: STALLED)
+    assert ramp.deepest_target == pytest.approx(26.0)
+    assert ramp.reached_floor is True

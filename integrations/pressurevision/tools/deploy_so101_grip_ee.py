@@ -880,6 +880,7 @@ class DeploymentEvidence:
         commands_sent: int,
         error: str | None = None,
         paired_boundaries: dict | None = None,
+        stall_tighten_result: dict | None = None,
     ) -> None:
         if self._closed:
             return
@@ -896,6 +897,7 @@ class DeploymentEvidence:
                 "achieved_hz": 0.0 if elapsed_s <= 0.0 else float(steps / elapsed_s),
                 "error": error,
                 "paired_boundaries": paired_boundaries,
+                "stall_tighten_result": stall_tighten_result,
             }
         )
         self._write_manifest()
@@ -1793,8 +1795,31 @@ def main():
                         ),
                     }
                 ),
+                stall_tighten_result=(
+                    None
+                    if stall_tighten is None
+                    else {
+                        "total_steps_applied": stall_tighten.total_steps_applied,
+                        "reached_floor": stall_tighten.reached_floor,
+                        "lift_boundary": stall_tighten.lift_boundary,
+                        # The deepest the ramp ever commanded, which is the
+                        # squeeze the carton actually took. The baseline
+                        # overshoots the lift boundary by up to one step by
+                        # construction, so this is the reference the
+                        # minimum-sufficient-grip objective has to improve on --
+                        # separately from whether the lift happened at all.
+                        "deepest_target": stall_tighten.deepest_target,
+                    }
+                ),
             )
             print(f"[deploy] evidence: {evidence.path}")
+            if stall_tighten is not None:
+                print(
+                    f"[stall ramp] steps={stall_tighten.total_steps_applied} "
+                    f"lift_boundary={stall_tighten.lift_boundary} "
+                    f"deepest_target={stall_tighten.deepest_target} "
+                    f"reached_floor={stall_tighten.reached_floor}"
+                )
             if paired is not None:
                 print(
                     f"[paired] lift_boundary={paired.lift_boundary} "
