@@ -32,15 +32,32 @@ No dataset or checkpoint is in Git. The recordings and the trained policies live
 on the Hugging Face Hub, and `docs/DATASETS.md` maps each one to what it was
 built from:
 
-- **datasets** — `hand_tracking_pv_carton_dual_view` (the raw carton
-  recordings), `..._middle_standard`, `..._phase_b`, `hand_tracking_pick_place`
-- **policies** — [`act_pickplace`](https://huggingface.co/stevenzenith/act_pickplace)
-  and [`dp_pickplace`](https://huggingface.co/stevenzenith/dp_pickplace) are
-  public; the carton-line ACT, Diffusion and SmolVLA checkpoints are not
+### Datasets
 
-Most of those repositories, and this one, are **private**. The links resolve for
-whoever has access and 404 for everyone else. Publishing any of it is a separate
-decision, recorded in `docs/RELEASE_AUDIT.md` as not taken.
+| Dataset | Episodes | What it is |
+| --- | --- | --- |
+| [`hand_tracking_pv_carton_dual_view`](https://huggingface.co/datasets/stevenzenith/hand_tracking_pv_carton_dual_view) | 54 | the raw carton recordings everything else derives from |
+| [`hand_tracking_pv_carton_middle_standard`](https://huggingface.co/datasets/stevenzenith/hand_tracking_pv_carton_middle_standard) | 13 | middle-pose episodes, used for the fine-tune below |
+| [`hand_tracking_pv_carton_phase_b`](https://huggingface.co/datasets/stevenzenith/hand_tracking_pv_carton_phase_b) | 30 | reviewed training split built from dual_view |
+| [`hand_tracking_pick_place`](https://huggingface.co/datasets/stevenzenith/hand_tracking_pick_place) | 100 | the earlier pick-place line |
+
+All are LeRobot format `v3.0` at 10 Hz, with `observation.images.front` and
+`observation.images.side` — both workspace cameras, aimed down at the table. The
+hand-tracking camera, the one pointed at the operator, is **not** a recorded
+feature, so the episodes contain the arm, the object and the bench, not a
+person.
+
+### Policies
+
+| Model | |
+| --- | --- |
+| [`act_pickplace`](https://huggingface.co/stevenzenith/act_pickplace), [`dp_pickplace`](https://huggingface.co/stevenzenith/dp_pickplace) | the pick-place line — **public** |
+| [`act_carton_phase_c_80k`](https://huggingface.co/stevenzenith/act_carton_phase_c_80k), [`diffusion_carton_phase_c_90k`](https://huggingface.co/stevenzenith/diffusion_carton_phase_c_90k), [`smolvla_carton_phase_c_80k`](https://huggingface.co/stevenzenith/smolvla_carton_phase_c_80k) | the carton line |
+| [`act_carton_phase_c_50k`](https://huggingface.co/stevenzenith/act_carton_phase_c_50k) → [`act_carton_middle_labels_5k`](https://huggingface.co/stevenzenith/act_carton_middle_labels_5k) | base and its middle-labels fine-tune |
+
+Everything above except the two pick-place policies is **private**, as is this
+repository, so those links 404 for anyone without access. Publishing is a
+separate decision and `docs/RELEASE_AUDIT.md` records it as not taken.
 
 **Read `docs/CLAIMS_AND_GATES.md` and `docs/RELEASE_AUDIT.md` before citing any
 result from this repository.** They separate what has run on the arm from what has
