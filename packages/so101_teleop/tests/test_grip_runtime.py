@@ -1,4 +1,4 @@
-from types import SimpleNamespace
+from dataclasses import dataclass
 
 import numpy as np
 import pytest
@@ -157,11 +157,39 @@ def test_visual_features_include_motion_and_shape_change():
     assert features[0] > 0.0
 
 
+@dataclass(frozen=True)
+class _Reading:
+    """A stand-in for the PV reading, declaring every field the mask reads.
+
+    The core package may not import `pressurevision_integration`, so this
+    mirrors `PressureReading`'s five relevant fields instead. Declaring them all
+    is the point: the mask reads them through `getattr` defaults, so a namespace
+    that simply omits one would be judged *valid* where a real reading is not.
+    """
+
+    pressure_0_1: float
+    active: bool
+    available: bool
+    status: str
+    fresh: bool = True
+
+
 def test_pv_teacher_label_masks_inactive_and_bad_samples():
-    good = SimpleNamespace(active=True, available=True, fresh=True, status="active", pressure_0_1=0.7)
+    good = _Reading(pressure_0_1=0.7, active=True, available=True, status="active")
     target, valid = pv_teacher_label(good)
     assert target.tolist() == pytest.approx([0.7])
     assert valid.tolist() == [1.0]
-    target, valid = pv_teacher_label(SimpleNamespace(active=False, available=True, pressure_0_1=0.8))
+    target, valid = pv_teacher_label(
+        _Reading(pressure_0_1=0.8, active=False, available=True, status="baseline")
+    )
     assert target.tolist() == [0.0]
     assert valid.tolist() == [0.0]
+    # Both halves of the guard, separately: a bad status alone masks the sample
+    # even when the reading claims to be fresh, and vice versa.
+    for bad in (
+        _Reading(pressure_0_1=0.8, active=True, available=True, status="pv_stale"),
+        _Reading(pressure_0_1=0.8, active=True, available=True, status="active", fresh=False),
+    ):
+        target, valid = pv_teacher_label(bad)
+        assert target.tolist() == [0.0]
+        assert valid.tolist() == [0.0]

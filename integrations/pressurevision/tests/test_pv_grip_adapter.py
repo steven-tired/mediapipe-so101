@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from lerobot_teleoperator_so101_webcam.config_so101_webcam_ee import SO101WebcamEEConfig
 from lerobot_teleoperator_so101_webcam.ee_controller import WebcamEEController
 from lerobot_teleoperator_so101_webcam.grip.contract import GripInput
 from lerobot_teleoperator_so101_webcam.grip.mediapipe import RELEASE_POS
@@ -19,12 +20,9 @@ from pressurevision_integration.pv_grip_controller import PressureVisionGripRunt
 from webcam_input.types import LandmarksData, WristData
 
 GRASPING = 20.0
-CFG = SimpleNamespace(
-    ee_x_idx=2, ee_x_sign=1.0,
-    ee_y_idx=0, ee_y_sign=-1.0,
-    ee_z_idx=1, ee_z_sign=1.0,
-    grip_pinch_min=0.02, grip_pinch_max=0.12, grip_sign=1.0,
-)
+# The real config, not a copy of its defaults: axis indices and signs are the
+# one thing that must not drift silently between here and the arm.
+CFG = SO101WebcamEEConfig()
 
 
 class FakeSource:

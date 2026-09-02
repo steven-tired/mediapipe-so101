@@ -1,7 +1,6 @@
 import ast
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -20,8 +19,10 @@ class _Reading:
     """A stand-in for whatever reading the caller has.
 
     Deliberately not any real sensor's type: the proposal machine duck-types on
-    these five attributes, and the test would stop proving that if it imported
-    one consumer's dataclass.
+    these attributes, and the test would stop proving that if it imported one
+    consumer's dataclass. Every attribute it reads is declared here, `fresh`
+    included -- a stand-in that simply omits one would be answered by the
+    `getattr` default and so pass where a real reading fails.
     """
 
     pressure_0_1: float
@@ -29,9 +30,10 @@ class _Reading:
     quality: float
     available: bool
     status: str
+    fresh: bool = True
 
 
-def _reading(pressure, *, active=True, available=True, quality=1.0, status=None):
+def _reading(pressure, *, active=True, available=True, quality=1.0, status=None, fresh=True):
     if status is None:
         status = "active" if active else "baseline"
     return _Reading(
@@ -40,6 +42,7 @@ def _reading(pressure, *, active=True, available=True, quality=1.0, status=None)
         quality=quality,
         available=available,
         status=status,
+        fresh=fresh,
     )
 
 
@@ -124,14 +127,7 @@ def test_pending_thermal_publication_holds_policy_without_advancing_state_or_fil
     proposal = module.PressureProposalStateMachine(initial_gripper=50.0)
     proposal.update(60.0, _reading(0.0, active=False))
     before_pending = proposal.update(60.0, _reading(1.0))
-    pending = SimpleNamespace(
-        pressure_0_1=0.0,
-        active=False,
-        quality=0.0,
-        available=True,
-        status="thermal_pending",
-        fresh=False,
-    )
+    pending = _reading(0.0, active=False, quality=0.0, status="thermal_pending", fresh=False)
 
     held = proposal.update(20.0, pending)
     held_again = proposal.update(100.0, pending)

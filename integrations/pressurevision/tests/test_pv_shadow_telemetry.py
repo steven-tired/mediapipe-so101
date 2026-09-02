@@ -9,10 +9,9 @@ than a duck-typed stand-in.
 import csv
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
-
 import pytest
 
+from lerobot_teleoperator_so101_webcam.gripper_hardware import GripperRuntimeTelemetry
 from lerobot_teleoperator_so101_webcam.shadow_telemetry import CONTROL_SHADOW_FIELDS
 from pressurevision_integration.protocol import PressureReading, PressureROI
 from pressurevision_integration.pv_shadow_telemetry import (
@@ -37,7 +36,7 @@ READING = PressureReading(
     received_at_s=9.98,
 )
 
-MOTOR = SimpleNamespace(
+MOTOR = GripperRuntimeTelemetry(
     observed_at_s=9.99,
     observed_gripper_pos=27.4,
     present_current=18,

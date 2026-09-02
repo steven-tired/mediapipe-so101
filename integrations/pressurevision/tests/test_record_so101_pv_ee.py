@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from pressurevision_integration.protocol import PressureReading
+from webcam_input.types import LandmarksData, WebcamSample, WristData
 
 recorder = importlib.import_module("record_so101_pv_ee")
 review = importlib.import_module("pressurevision_integration.pv_episode_review")
@@ -348,13 +349,20 @@ def test_rerecord_discards_buffer_before_building_review_artifacts():
 
 
 def test_recorder_hand_gate_uses_new_frames_and_sends_no_action(monkeypatch):
+    # The real sample type: this gate is the arm lock, so a field it reads must
+    # be a field the publisher actually sends.
     samples = [
-        argparse.Namespace(
-            frame_id=index,
-            observed_at_s=10.0 + index,
-            wrist=argparse.Namespace(valid=True),
-            landmarks=argparse.Namespace(valid=True),
+        WebcamSample(
             preview_frame=None,
+            wrist=WristData(
+                position=np.zeros(3),
+                quaternion=np.array([0.0, 0.0, 0.0, 1.0]),
+                fist_state="open",
+                valid=True,
+            ),
+            landmarks=LandmarksData(landmarks=np.zeros((21, 3)), valid=True),
+            observed_at_s=10.0 + index,
+            frame_id=index,
         )
         for index in range(4)
     ]

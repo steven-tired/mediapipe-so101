@@ -1,8 +1,8 @@
 import math
-from types import SimpleNamespace
 
 import pytest
 
+from pressurevision_integration.protocol import PressureReading
 from pressurevision_integration.pv_relative_mapping import (
     RELATIVE_PRESSURE_LOW_PASS_HZ,
     PressureRangeMapper,
@@ -12,10 +12,12 @@ from pressurevision_integration.pv_relative_mapping import (
 
 
 def _pressure(value=0.0, *, active=False, available=True):
-    return SimpleNamespace(
+    return PressureReading(
         pressure_0_1=value,
         active=active,
+        quality=1.0,
         available=available,
+        status="active" if active else "baseline",
     )
 
 
