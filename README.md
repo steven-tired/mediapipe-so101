@@ -95,13 +95,27 @@ Python **3.12** (the packages pin `>=3.12,<3.13`). These steps use
 ### 1. LeRobot, from source
 
 `packages/so101_teleop` pins `lerobot==0.5.2`. **PyPI does not have that
-version** — it is at 0.6.x — so LeRobot must come from a source checkout at a
-commit that declares 0.5.2. This repository is developed against `da92db8`.
+version** — it is at 0.6.x — so LeRobot must come from a source checkout.
 
 ```bash
 git clone https://github.com/huggingface/lerobot
 git -C lerobot checkout da92db8
 ```
+
+**Why that commit, honestly:** it is upstream `main` from 2026-06-17, the day
+this line of work started. It declares `0.5.2` in its own `pyproject.toml` and
+matches no release tag. The pin records what was installed, not a compatibility
+finding — nobody has tested 0.6.x here.
+
+Upgrading is real work rather than a version bump, because this repository
+imports well below LeRobot's public surface: `datasets.lerobot_dataset`,
+`model.kinematics`, `motors.feetech`, `policies.*.processor_*`,
+`policies.factory`, `common.control_utils`, and `record_loop` from
+`scripts.lerobot_record`. Those move between versions — the
+`so101_follower` → `so_follower` rename already happened once. The recorded
+datasets are LeRobot format `v3.0` and the trained policies came out of this
+version's training stack, so an upgrade needs a dataset readback and a physical
+gate, not just a green test suite.
 
 ### 2. The environment
 
@@ -243,22 +257,204 @@ The GPU is used for policy training and deployment only. Teleoperation and
 recording run CPU-only on purpose — the wrappers hide the GPU for those, because
 this laptop's dGPU wedges on wake from runtime suspend.
 
-## Gripper modes
+## Workflows
+
+### Gripper numbers, once
+
+The gripper command is LeRobot's `RANGE_0_100`: **0 is fully closed, 100 fully
+open.** Lower means tighter. `50` is the calibrated centre and is where the
+MediaPipe path parks on release. Two thresholds matter downstream: below **30**
+the operator has committed to a grasp, above **65** the hand is deliberately
+open. The gap is wide and asymmetric on purpose — MediaPipe degrades as fingers
+occlude each other while closing and recovers while opening, so the release
+signal is trustworthy exactly when the grip signal is not.
+
+### Live teleoperation
+
+```bash
+source scripts/smoke_env.sh
+./scripts/view_camera.sh --profile dp100    # no arm motion
+./scripts/run_arm_ee.sh
+```
+
+Hold your right hand in view; after **3 continuous seconds** the arm arms itself
+and prints `ARM ENABLED`. Until then it will not move, so a half-tracked hand
+cannot jerk it. Then:
+
+- **right wrist** moves the end effector — differential, so where you start does
+  not matter, only how you move;
+- **right pinch** drives the gripper;
+- **left fist** is the clutch: it freezes motion so you can reposition your arm,
+  the way lifting a mouse re-centres it;
+- **the middle pose** (`fist` by default, `right_v` optional) parks the arm at
+  its middle pose and resets the grip state.
+
+### Recording a dataset
+
+```bash
+./scripts/run_record_ee.sh
+```
+
+Same controls, plus episode keys in the preview window: **SPACE** saves the
+episode, **ESC** discards it and ends the session, **R** re-records the current
+attempt. Recording appends, so a session adds to whatever is already at
+`SO101_DATASET_ROOT`.
+
+### Deploying a policy
+
+```bash
+./scripts/view_camera.sh --profile dp100    # ALWAYS first
+./scripts/run_deploy_ee.sh --policy <checkpoint dir> --duration 30
+```
+
+The camera profile is not cosmetic. `view_camera.sh` overlays the pixel targets
+the policy was trained against — `dp100` expects the tag at `(416, 297)`,
+`dp50` at `(421, 143)`, both within 30 px — and a mismatch is a visual domain
+shift that the policy sees and **nothing reports**. Align first, every time.
+
+`--duration` bounds the run. The deployment path refuses a policy whose camera
+set does not match before the robot connects, rather than after the arm has
+started moving.
+
+### PressureVision grip control
+
+PV supplies grip *severity* only, while a MediaPipe grasp is active. It can
+squeeze harder or softer; it can never open the gripper or move the arm.
+
+**1. Build the rig.** A sheet of **white paper flat on the table** is the pad —
+that is the whole surface. Mount the pad camera (a C270 here) **overhead**,
+looking down at it, on a fixed mount that will not be nudged; the workspace and
+side cameras stay where recording needs them. Viewpoint is the variable that
+decides whether the network responds at all, so aim by pressing and watching the
+response rather than by measuring the frame. Lock the camera before trusting
+anything you see:
+
+```bash
+v4l2-ctl -d /dev/video2 -c white_balance_automatic=0 \
+    -c white_balance_temperature=4000 -c auto_exposure=1
+```
+
+Colour carries the blanching cue the network reads, so an unlocked camera drifts
+away from the calibration it is scored against.
+
+**2. Calibrate — once per rig, not per session.**
+
+```bash
+./scripts/run_pv_pad.sh aim              # frame the pad; writes the crop
+./scripts/run_pv_pad.sh capture 07       # labelled press trials
+./scripts/run_pv_pad.sh fit 07           # -> local/pv_sessions/pv_levels_07.json
+```
+
+`aim` is a live loop: arrow keys move the crop, `a/d/w/s` resize it, `g` snaps to
+a suggested box, `space` prints the crop. Hug the pad; do not chase an aspect
+ratio.
+
+`capture` runs **8 repeats × 3 labels** (none / light / hard) — 24 trials. For
+each, press and hold, then **SPACE** to record; the window counts down the hold
+and tells you if you lifted early. Press at *your own* idea of light and hard:
+the default `--intent-labels` mode deliberately has no kitchen scale, because a
+scale under the pad raises the pressing surface and calibration on a geometry
+the teleop never runs in produces anchors that do not transfer.
+
+`fit` scores the separation and writes the boundaries. Read its confusion matrix
+before trusting it — a session that cannot tell light from hard will not get
+better downstream.
+
+**If the rig has not moved, do not recalibrate.** Put the camera back instead:
+
+```bash
+./scripts/run_pv_pad.sh rematch 07
+```
+
+It overlays where the pad sat at calibration; nudge the camera until they agree.
+The sender refuses to stream on a mismatch (`--require-scene-match`), so this
+cannot be skipped silently. Copy an existing `levels.json` with `cp -p`: the
+freshness gate reads file **mtime**, so a plain copy makes a stale fit look
+minutes old, and raising `PV_MAX_LEVEL_AGE_MINUTES` should be a deliberate act.
+
+**3. Record with PV supervision.**
+
+```bash
+PV_LEVELS=local/pv_sessions/pv_levels_07.json ./scripts/run_record_pv_ee.sh
+```
+
+This starts two processes: the PV sender (GPU, its own interpreter) and the
+recorder (CPU). Grasp the object with your right hand as usual; then press the
+pad harder or softer to modulate how hard the gripper squeezes.
+
+**What the numbers mean.** The default `carton_span` mapping is calibrated for a
+paper carton and spans **20..32**:
+
+| PV reading | Command | Meaning |
+| --- | --- | --- |
+| no grasp | 100 | open |
+| pressure 0 | **32** | touching, not squeezing |
+| pressure 1 | **20** | firm squeeze |
+
+So more pressure means a *lower* number, and during a grasp the command never
+leaves 20..32. A different object needs a different span. `PV_MAPPING` selects it: the
+recorder accepts `carton_span` (default), `soft_direct`, and `hard_profile`,
+the last taking a fitted object profile via `PV_OBJECT_PROFILE`.
+
+**The adjustment lock.** Pressing adjusts; letting go *keeps* what you set. Lose
+pad contact for **1.0 s** and the state machine goes
+`adjusting → temporary_hold → locked`, holding the grip at the position you had
+reached — you can take your hand off the pad without the object dropping.
+Touching the pad again for **0.15 s** resumes adjustment; a single flickering
+frame does not. Each latch prints `[pv] adjustment LOCKED at q=…`.
+
+**What to check in a run**, rather than "it did not crash": the command follows
+pressure and stays inside 20..32; the lock reaches `locked` and prints an
+anchor; and in the recorded episode `observation.grip_intent_teacher` **varies**
+— a constant column means the lock never latched and the supervision is noise.
+
+**If the PV sender dies**, the episode is discarded automatically and the
+session ends. Ending is also how the grip is released: the gripper is commanded
+open before the bus closes, because dropping torque alone does not open a jaw
+held by gear friction.
+
+### When the arm misbehaves
+
+```bash
+./scripts/run_so101_diag.sh ids      # ping every servo; finds a dropping one
+./scripts/run_so101_diag.sh health   # torque/temp/current/gain registers
+./scripts/run_so101_diag.sh relax    # torque off, to check binding by hand
+./scripts/run_so101_diag.sh lift     # instrumented lift, run cold
+```
+
+Start with `ids`. A servo that answers 0/10 is absent from the bus even if the
+chain past it still works — the two connectors on a Feetech board are wired in
+parallel, so a half-seated plug loses that servo while the bus continues to the
+next one. Reseat both connectors on the servo that dropped, not the cable
+upstream of it.
+
+`run_diagnose.sh` is the deployment-side harness: it logs camera, joint, load
+and temperature alongside the predicted action, for separating "the policy is
+wrong" from "the arm is not doing what it was told".
+
+## The grip safety contract
 
 ```bash
 --gripper-mode mediapipe      # default
 --gripper-mode pressurevision # optional, requires the PV sender process
 ```
 
-MediaPipe always owns arm motion and grasp/release authority. The default mode
-derives gripper position from pinch. The optional PressureVision mode uses PV only
-for grip *severity* while a MediaPipe grasp is active; PV never opens the gripper.
+**MediaPipe always owns arm motion and grasp/release authority.** A
+`GripperController` only decides *how far* to close, never whether to hold or
+let go. That is the whole reason the PV path cannot open the gripper, and it is
+enforced by the seam in `grip/contract.py` rather than by convention.
 
-Missing, invalid, or stale PV input holds the current gripper command — a silent
-sender keeps the gripper closed rather than dropping a held object. Only an explicit
-MediaPipe release opens it. A session that ends for any reason — key, fault, or
-exception — opens the gripper before closing the bus, because dropping torque alone
-does not: gear friction keeps the jaw on the object.
+Missing, invalid, or stale PV input **holds** the current command — a silent
+sender keeps the gripper closed rather than dropping whatever is in it. Only an
+explicit MediaPipe release opens it. A session that ends for any reason — key,
+fault, or exception — commands the gripper open before closing the bus, because
+dropping torque alone does not: gear friction keeps the jaw on the object.
+
+One gate in this contract is **not** satisfied, and `docs/RELEASE_AUDIT.md`
+records it as open: releasing by opening your hand *while running* with the PV
+sender dead. In practice the session ends when the sender dies, and ending
+releases — but that is a different mechanism from the one the contract
+describes, and it is not written down here as if it were the same thing.
 
 The core packages import and run without PressureVision installed.
 
