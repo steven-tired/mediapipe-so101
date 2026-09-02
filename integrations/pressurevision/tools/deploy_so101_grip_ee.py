@@ -483,7 +483,9 @@ class TightenRampOperator:
         deepest = ramp.deepest_target
         for index, (text, colour) in enumerate((
             (
-                "TIGHTENING" if self.engaged else "watching; press t if it grips but will not lift",
+                "TIGHTENING - press t THE MOMENT it lifts, to record the boundary"
+                if self.engaged
+                else "watching; press t if it grips but will not lift",
                 (0, 255, 0) if self.engaged else (0, 200, 255),
             ),
             (
@@ -1882,6 +1884,20 @@ def main():
             )
             print(f"[deploy] evidence: {evidence.path}")
             if stall_tighten is not None:
+                if (
+                    stall_operator is not None
+                    and stall_operator.engaged
+                    and stall_tighten.total_steps_applied
+                ):
+                    # The boundary is recorded when the ramp disengages, so a
+                    # run that ends still engaged loses the one label it went
+                    # out to collect. Say so here rather than letting a null
+                    # column look like "the ramp did nothing".
+                    print(
+                        "[stall ramp] WARNING: the run ended with the ramp still engaged, so "
+                        "lift_boundary was never recorded. Press 't' at the lift next time; "
+                        "recover this one from control.jsonl."
+                    )
                 print(
                     f"[stall ramp] steps={stall_tighten.total_steps_applied} "
                     f"lift_boundary={stall_tighten.lift_boundary} "
