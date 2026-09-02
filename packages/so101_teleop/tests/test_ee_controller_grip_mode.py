@@ -351,3 +351,91 @@ def test_a_clutched_frame_is_not_observed():
     _step(controller, pinch=0.05, clutch=True)
 
     assert gripper.frames == []
+
+
+# --- which gesture parks the arm ---
+
+def _v_sign_points(pinch=0.08):
+    """index+middle extended, ring+pinky curled."""
+    points = np.zeros((21, 3))
+    for (tip, pip), extended in zip(((8, 6), (12, 10), (16, 14), (20, 18)),
+                                    (True, True, False, False)):
+        points[pip] = [0.0, 0.06, 0.0]
+        points[tip] = [0.0, 0.10 if extended else 0.03, 0.0]
+    points[4] = [pinch, 0.10, 0.0]
+    return points
+
+
+def _step_points(controller, points, *, valid=True):
+    wrist = WristData(
+        position=np.zeros(3),
+        quaternion=np.array([0.0, 0.0, 0.0, 1.0]),
+        fist_state="open",
+        valid=valid,
+    )
+    return controller.step(wrist, LandmarksData(landmarks=points, valid=valid))
+
+
+def test_the_validated_fist_clutch_is_the_default():
+    """The 100-episode pick-place dataset was recorded through it."""
+    assert _controller().middle_gesture == "fist"
+
+
+def test_an_unknown_middle_gesture_is_rejected():
+    with pytest.raises(ValueError, match="middle_gesture"):
+        _controller(middle_gesture="wave")
+
+
+def test_the_fist_clutch_ignores_a_v_sign():
+    controller = _controller()
+
+    _, state = _step_points(controller, _v_sign_points())
+
+    assert state == "MOVING"
+
+
+def test_the_v_sign_mode_ignores_a_fist():
+    """PressureVision occupies the left hand, so a left fist is not a gesture
+    the operator can make in that mode -- it must not park the arm."""
+    controller = _controller(middle_gesture="right_v")
+
+    _, state = _step(controller, clutch=True)
+
+    assert state == "MOVING"
+
+
+def test_a_raw_v_sign_freezes_before_the_dwell_parks_the_arm(monkeypatch):
+    """Moving during the dwell would make every attempt to park the arm start
+    with a lurch."""
+    import lerobot_teleoperator_so101_webcam.ee_controller as module
+
+    now = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    controller = _controller(middle_gesture="right_v")
+
+    joints, state = _step_points(controller, _v_sign_points())
+    assert (joints, state) == (None, "HOLD")
+    assert controller.middle_gesture_seen and not controller.middle_gesture_active
+
+    now[0] += module.MIDDLE_GESTURE_HOLD_S
+    joints, state = _step_points(controller, _v_sign_points())
+
+    assert state == "MIDDLE"
+    assert controller.middle_gesture_active
+
+
+def test_a_single_stray_v_frame_does_not_restart_the_dwell_clock(monkeypatch):
+    import lerobot_teleoperator_so101_webcam.ee_controller as module
+
+    now = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    controller = _controller(middle_gesture="right_v")
+    _step_points(controller, _v_sign_points())
+
+    # A frame without the gesture clears the clock, so the dwell starts over.
+    now[0] += 0.3
+    _step(controller)
+    now[0] += 0.3
+    _, state = _step_points(controller, _v_sign_points())
+
+    assert state == "HOLD"

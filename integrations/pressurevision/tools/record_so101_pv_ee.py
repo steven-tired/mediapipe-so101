@@ -1537,6 +1537,10 @@ def run_recording(args: argparse.Namespace) -> int:
                 cfg,
                 use_oak=not args.no_oak,
                 gripper=PVGripAdapter(pv),
+                # The left hand is on the PressureVision pad, so a left fist is
+                # not a gesture the operator can make. This is also what
+                # local/evidence/ was recorded through.
+                middle_gesture="right_v",
                 wrist_roll_range_deg=args.wrist_roll_range_deg,
                 wrist_roll_gain=args.wrist_roll_gain,
             )

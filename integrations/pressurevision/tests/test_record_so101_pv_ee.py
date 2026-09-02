@@ -1106,3 +1106,12 @@ def test_evidence_and_dataset_paths_are_rejected_when_nested(tmp_path):
                 "--max-position-lag", "5.0",
             ]
         )
+
+
+def test_the_recorder_parks_on_the_right_v_not_a_left_fist():
+    """The left hand is pressing the PV pad. A recorder that kept the fist
+    clutch would be unparkable in practice, and would put newly recorded
+    episodes on different operator semantics from local/evidence/."""
+    source = inspect.getsource(recorder.run_recording)
+
+    assert 'middle_gesture="right_v"' in source

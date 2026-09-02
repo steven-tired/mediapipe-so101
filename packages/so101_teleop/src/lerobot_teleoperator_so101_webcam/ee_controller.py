@@ -12,6 +12,7 @@ The controller owns the EE->joints pipeline (with the fixes proven during bring-
 """
 
 from dataclasses import dataclass
+import time
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -55,6 +56,15 @@ MIDDLE_WRIST_DOWN_DEG = 90.0     # clutch/ready pose pitches wrist down so the g
 # gripper down. Opting in past this range trades the down-pose for roll authority.
 MAX_WRIST_ROLL_RANGE_DEG = 45.0
 
+# Which gesture parks the arm at the middle pose.
+#   fist    -- the validated default: a closed LEFT fist. The 100-episode
+#              pick-place dataset was recorded through it.
+#   right_v -- index+middle extended on the RIGHT hand. PressureVision occupies
+#              the left hand (it is pressing the pad), so a left fist is not a
+#              gesture the operator can make in that mode.
+MIDDLE_GESTURES = ("fist", "right_v")
+MIDDLE_GESTURE_HOLD_S = 0.4      # ignore a one-frame V-sign misclassification
+
 # --- Gripper strength (0 = fully closed/clamped, 100 = open) ---
 # ASYMMETRIC EMA: close fast & firm, open slow. The slow-open is what stops the claw loosening when
 # pinch tracking jitters mid-lift (a brief "open" reading barely moves the command). Raise
@@ -63,6 +73,8 @@ MAX_WRIST_ROLL_RANGE_DEG = 45.0
 # fully-touching) pinch still reaches a firm grip -- increase it if the grip is still too soft.
 # The tuned values and the smoothing itself now live behind the gripper contract,
 # so the optional PressureVision mode can be swapped in without touching this file.
+from webcam_input.gestures import detect_v_sign
+
 from .grip.contract import GripInput
 from .grip.mediapipe import (  # noqa: F401  (re-exported for existing callers)
     GRIP_CLOSE_ALPHA,
@@ -154,9 +166,15 @@ class WebcamEEController:
         *,
         grip_mode: str = "tracked",
         grip_map: str = "overdrive",
+        middle_gesture: str = "fist",
         wrist_roll_range_deg: float = 0.0,
         wrist_roll_gain: float = 1.0,
     ):
+        if middle_gesture not in MIDDLE_GESTURES:
+            raise ValueError(
+                f"unknown middle_gesture {middle_gesture!r}; expected one of {MIDDLE_GESTURES}"
+            )
+        self.middle_gesture = middle_gesture
         if grip_mode not in GRIP_MODES:
             raise ValueError(f"unknown grip_mode {grip_mode!r}; expected one of {GRIP_MODES}")
         if grip_mode != "tracked" and gripper is not None:
@@ -207,6 +225,9 @@ class WebcamEEController:
         self.ref = None
         self.roll_ref = None
         self.last_pinch = 0.0
+        self._middle_gesture_since_s = None
+        self.middle_gesture_seen = False
+        self.middle_gesture_active = False
         self.prev_enabled = False
         self.smoothed = None
         self.gripper = gripper or MediaPipeGripperController(
@@ -283,8 +304,12 @@ class WebcamEEController:
         """Return (joint_targets | None, state). None = HOLD (no new command; arm holds last)."""
         if self.pipeline is None:
             raise RuntimeError("WebcamEEController.build(ee_centre) must be called before step().")
-        clutch = (wrist.fist_state == "closed")
-        enabled = bool(wrist.valid and not clutch)
+        lm = np.asarray(landmarks.landmarks, dtype=float)
+        clutch = self._middle_requested(wrist, landmarks, lm)
+        # `seen`, not `clutch`: a raw V-sign freezes the arm at once, and only
+        # the return to middle waits out the dwell. Moving during the dwell
+        # would make every attempt to park the arm start with a lurch.
+        enabled = bool(wrist.valid and not self.middle_gesture_seen)
 
         if enabled and (not self.prev_enabled or self.ref is None):
             self.ref = np.asarray(wrist.position, dtype=float).copy()
@@ -297,7 +322,6 @@ class WebcamEEController:
         displacement = (np.asarray(wrist.position, dtype=float) - self.ref) if enabled else np.zeros(3)
         self.prev_enabled = enabled
 
-        lm = np.asarray(landmarks.landmarks, dtype=float)
         pinch = float(np.linalg.norm(lm[_THUMB_TIP] - lm[_INDEX_TIP]))
         # Kept for the caller: a recorder writing telemetry needs the pinch that
         # produced this frame's command, and recomputing it would be a second
@@ -364,6 +388,36 @@ class WebcamEEController:
         # commanding force against a scene it can no longer see.
         self._disarm_gripper(pinch, wrist, transition="hold")
         return None, "HOLD"
+
+    def _middle_requested(self, wrist, landmarks, lm) -> bool:
+        """True when the operator is asking for the middle pose this frame.
+
+        The V-sign is dwell-gated and the fist is not, because they fail
+        differently: a fist is unambiguous, while one frame of a hand passing
+        through an index+middle pose is a misclassification the arm should not
+        act on. A raw V-sign still disables motion immediately -- only the
+        return to middle waits out the dwell.
+        """
+        if self.middle_gesture == "fist":
+            self.middle_gesture_seen = self.middle_gesture_active = (
+                wrist.fist_state == "closed"
+            )
+            return self.middle_gesture_active
+
+        self.middle_gesture_seen = bool(
+            wrist.valid and landmarks.valid and detect_v_sign(lm)
+        )
+        if not self.middle_gesture_seen:
+            self._middle_gesture_since_s = None
+            self.middle_gesture_active = False
+            return False
+        now_s = time.monotonic()
+        if self._middle_gesture_since_s is None:
+            self._middle_gesture_since_s = now_s
+        self.middle_gesture_active = (
+            now_s - self._middle_gesture_since_s >= MIDDLE_GESTURE_HOLD_S
+        )
+        return self.middle_gesture_active
 
     def _disarm_gripper(self, pinch, wrist, *, transition: str) -> None:
         """Tell a sensing gripper this frame produced no command. Optional hook."""
