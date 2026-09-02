@@ -124,6 +124,193 @@ class GripFeedbackController:
         return float(np.clip(command, 0.0, 100.0))
 
 
+@dataclass(frozen=True)
+class StallConfig:
+    """When a frozen body trajectory counts as ACT withholding the lift."""
+
+    window_s: float = 2.0
+    motion_epsilon: float = 0.05
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.window_s) or self.window_s <= 0.0:
+            raise ValueError("window_s must be positive and finite")
+        if not math.isfinite(self.motion_epsilon) or self.motion_epsilon < 0.0:
+            raise ValueError("motion_epsilon must be non-negative and finite")
+
+
+class BodyStallDetector:
+    """Detect the stall ACT enters when its grasp is not good enough to lift.
+
+    In trial05 the `shoulder_lift` and `elbow_flex` commands were bit-identical
+    at `-19.32` and `35.82` for about nine seconds, and resumed a large
+    coordinated motion within one second of the grasp being tightened by hand.
+    So the policy withholds the lift rather than failing open-loop, and the
+    withholding is visible in the commands alone -- no operator judgement and
+    no camera.
+
+    Commands, not readback: readback carries servo noise and the standing
+    command-to-readback offset, and a joint holding a load under gravity is not
+    still in readback even when nothing is being asked of it.
+    """
+
+    def __init__(self, config: StallConfig | None = None):
+        self.config = config or StallConfig()
+        self._reference: np.ndarray | None = None
+        self._still_since_s: float | None = None
+
+    def reset(self) -> None:
+        self._reference = None
+        self._still_since_s = None
+
+    def update(self, *, t: float, body_command) -> dict:
+        command = np.asarray(body_command, dtype=np.float64).reshape(-1)
+        if command.size == 0:
+            raise ValueError("body_command must have at least one joint")
+        if self._reference is not None and self._reference.size != command.size:
+            raise ValueError("body_command changed width mid-run")
+
+        # Time since the command last moved, measured against the command it
+        # settled at rather than against the previous sample. A drift smaller
+        # than `motion_epsilon` per step would otherwise never break the stall,
+        # however far the arm travelled.
+        #
+        # Not a rolling window over a deque: a window whose span has to reach
+        # `window_s` before it can report a stall spends every other cycle a
+        # float hair under the threshold, and the ramp below reads each of
+        # those as "the stall broke". That fabricated a lift boundary equal to
+        # the *untightened* depth on every second cycle, and did it silently.
+        spread = 0.0 if self._reference is None else float(
+            np.max(np.abs(command - self._reference))
+        )
+        if self._reference is None or spread > self.config.motion_epsilon:
+            self._reference = command
+            self._still_since_s = float(t)
+            spread = 0.0
+        still_for = float(t) - self._still_since_s
+        return {
+            "stalled": still_for >= self.config.window_s,
+            "still_for_s": still_for,
+            "command_spread": spread,
+        }
+
+
+@dataclass(frozen=True)
+class TightenRampConfig:
+    """A tighten ramp sized by the measured deadband, with a hard floor."""
+
+    step: float
+    interval_s: float
+    floor_pos: float
+    release_threshold: float = 65.0
+
+    def __post_init__(self) -> None:
+        values = (self.step, self.interval_s, self.floor_pos, self.release_threshold)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("tighten ramp values must be finite")
+        if self.step <= 0.0:
+            raise ValueError("step must be positive; size it from the deadband calibration")
+        if self.interval_s <= 0.0:
+            raise ValueError("interval_s must be positive")
+        if not 0.0 <= self.floor_pos <= 100.0:
+            raise ValueError("floor_pos must be a gripper position")
+
+
+class StallTightenRamp:
+    """Break an ACT stall by tightening, then hand the gripper straight back.
+
+    This is the no-learning baseline the 2026-09-01 gates require any grip head
+    to beat. It has no model, no features, and three rules: tighten only while
+    the body is stalled, never past a fixed floor, and never while the policy
+    is asking for a release. The depth at which the stall breaks is recorded as
+    that grasp's lift boundary, which is the paired label the collection
+    protocol wants.
+
+    The floor is fixed rather than learned because the tight bound has no
+    labelled example and possibly no sensor: no run has been reviewed as
+    crushed, `Present_Load` is quantized to multiples of four and near constant
+    while holding, and `Present_Current` spans about sixteen counts.
+    """
+
+    def __init__(self, config: TightenRampConfig, *, stall: StallConfig | None = None):
+        self.config = config
+        self.detector = BodyStallDetector(stall)
+        self.reset()
+
+    def reset(self) -> None:
+        self.detector.reset()
+        self.target: float | None = None
+        self.steps_applied = 0
+        self.at_floor = False
+        self.lift_boundary: float | None = None
+        self._last_step_at_s: float | None = None
+
+    def update(self, *, t: float, policy_target: float, actual_pos: float, body_command):
+        """Return the gripper target to command, and what was decided."""
+        stall = self.detector.update(t=t, body_command=body_command)
+        policy_target = float(policy_target)
+        actual_pos = float(actual_pos)
+
+        if policy_target >= self.config.release_threshold:
+            # The policy is opening. Tightening into a release would fight the
+            # only part of the task these checkpoints do reliably.
+            self._release()
+            return policy_target, self._label(stall, "release", 0.0)
+
+        if not stall["stalled"]:
+            if self.target is not None:
+                # The stall broke while we were ramping. Only a ramp that
+                # actually tightened produced a boundary: if the body resumed
+                # before the first step landed, the grasp was adequate on its
+                # own and there is nothing to label. Recording `actual_pos`
+                # regardless would fill the column with the starting depth.
+                if self.steps_applied:
+                    self.lift_boundary = actual_pos
+                    action = "resumed_after_tighten"
+                else:
+                    action = "resumed_untouched"
+                self._release()
+                return policy_target, self._label(stall, action, 0.0)
+            return policy_target, self._label(stall, "following_policy", 0.0)
+
+        if self.target is None:
+            self.target = policy_target
+            self._last_step_at_s = t
+            return self.target, self._label(stall, "latched", 0.0)
+
+        if t - self._last_step_at_s < self.config.interval_s:
+            # Dwell. Stepping faster than the jaw settles would stack commands
+            # the encoder has not yet answered, which is how a ramp reads as
+            # deeper than the jaw has actually gone.
+            return self.target, self._label(stall, "dwelling", 0.0)
+
+        self._last_step_at_s = t
+        stepped = self.target - self.config.step
+        if stepped < self.config.floor_pos:
+            self.at_floor = True
+            return self.target, self._label(stall, "at_floor", 0.0)
+        delta = stepped - self.target
+        self.target = stepped
+        self.steps_applied += 1
+        return self.target, self._label(stall, "tighten", delta)
+
+    def _release(self) -> None:
+        self.target = None
+        self.steps_applied = 0
+        self.at_floor = False
+        self._last_step_at_s = None
+
+    def _label(self, stall: dict, action: str, delta_q: float) -> dict:
+        return {
+            "action": action,
+            "delta_q": float(delta_q),
+            "ramp_target": self.target,
+            "steps_applied": self.steps_applied,
+            "at_floor": self.at_floor,
+            "lift_boundary": self.lift_boundary,
+            **stall,
+        }
+
+
 class GripResidualHead(torch.nn.Module):
     """Small numeric head for a signed gripper suggestion and grasp stability."""
 

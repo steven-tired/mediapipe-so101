@@ -56,6 +56,9 @@ from lerobot_teleoperator_so101_webcam.ee_control import joint_center
 from lerobot_teleoperator_so101_webcam.ee_controller import MIDDLE_WRIST_DOWN_DEG
 from lerobot_teleoperator_so101_webcam.grip.runtime import (
     GRIP_CONTEXTS,
+    StallConfig,
+    StallTightenRamp,
+    TightenRampConfig,
     GripFeedbackConfig,
     GripFeedbackController,
     GripCandidateScorer,
@@ -669,6 +672,7 @@ class DeploymentEvidence:
         grip_candidate_trial_model: str | None = None,
         grip_candidate_load_gate: bool = True,
         grip_intervention_step: float = 0.0,
+        stall_tighten: dict | None = None,
         action_step_repeat: int = 1,
         max_steps: int | None = None,
         start_joints: list[float] | None = None,
@@ -700,6 +704,7 @@ class DeploymentEvidence:
             "grip_candidate_trial_model": grip_candidate_trial_model,
             "grip_candidate_load_gate": grip_candidate_load_gate,
             "grip_intervention_step": grip_intervention_step,
+            "stall_tighten": stall_tighten,
             "action_step_repeat": action_step_repeat,
             "max_steps": max_steps,
             "start_joints": start_joints,
@@ -751,6 +756,7 @@ class DeploymentEvidence:
         grip_residual_shadow: dict | None = None,
         grip_candidate_trial: dict | None = None,
         grip_intervention: dict | None = None,
+        stall_tighten: dict | None = None,
         command_sent: bool,
     ) -> None:
         for name in self.image_names:
@@ -780,6 +786,7 @@ class DeploymentEvidence:
             "grip_residual_shadow": grip_residual_shadow,
             "grip_candidate_trial": grip_candidate_trial,
             "grip_intervention": grip_intervention,
+            "stall_tighten": stall_tighten,
             "command_sent": bool(command_sent),
         }
         if action_trace is not None:
@@ -994,6 +1001,20 @@ def main():
                     help="Diffusion only: override the sampler. 'ddim' + '--inference-steps 10' gives "
                          "~10x faster inference at ~full quality (the right speed fix). 'ddpm' is the "
                          "trained default.")
+    ap.add_argument("--stall-tighten-step", type=float, default=0.0,
+                    help="break an ACT stall by tightening this many degrees per interval. "
+                         "Size it from run_gripper_deadband.sh: a step under the measured "
+                         "breakout deadband ramps in stick-slip bursts and the recorded "
+                         "boundary means nothing. Zero disables the controller.")
+    ap.add_argument("--stall-tighten-interval-s", type=float, default=1.0,
+                    help="dwell between tighten steps; must exceed the jaw settle time")
+    ap.add_argument("--stall-tighten-floor", type=float, default=22.0,
+                    help="tightest gripper position the ramp may command. Fixed, not learned: "
+                         "the tight bound has no labelled example and possibly no sensor.")
+    ap.add_argument("--stall-window-s", type=float, default=2.0,
+                    help="how long the body commands must hold still to count as a stall")
+    ap.add_argument("--stall-epsilon", type=float, default=0.05,
+                    help="body command deviation that still counts as holding still")
     ap.add_argument("--grip-context", choices=GRIP_CONTEXTS, default="unknown",
                     help="Deployable object context appended to observation.state for grip-aux policies.")
     ap.add_argument("--grip-control", choices=("direct", "aux"), default="direct",
@@ -1058,6 +1079,24 @@ def main():
             ap.error("grip candidate trial cannot be combined with PV correction recording")
     elif args.grip_candidate_no_load_gate:
         ap.error("--grip-candidate-no-load-gate requires --grip-candidate-trial-model")
+    if args.stall_tighten_step < 0.0:
+        ap.error("--stall-tighten-step must be non-negative")
+    if args.stall_tighten_step:
+        if not args.arm_enabled or args.evidence_dir is None:
+            ap.error("--stall-tighten-step requires --arm-enabled and --evidence-dir")
+        if args.grip_control != "direct" or args.gripper_close_offset:
+            ap.error("the stall ramp requires direct control with zero close offset")
+        if args.gripper_only:
+            ap.error("the stall ramp reads the ACT body trajectory; it cannot hold the body")
+        if (
+            args.grip_intervention_step
+            or args.grip_candidate_trial_model is not None
+            or args.grip_residual_shadow_model is not None
+        ):
+            ap.error(
+                "the stall ramp is the no-learning baseline; run it alone, not alongside "
+                "a head or a manual intervention"
+            )
     if args.grip_intervention_step < 0.0 or args.grip_intervention_step > 1.0:
         ap.error("--grip-intervention-step must be in [0, 1]")
     if args.grip_intervention_step:
@@ -1172,6 +1211,7 @@ def main():
     correction_toggle = None
     grip_intervention = None
     grip_candidate_trial = None
+    stall_tighten = None
     evidence = None
     connected = False
     normal_exit = False
@@ -1222,6 +1262,17 @@ def main():
                 ),
                 grip_candidate_load_gate=not args.grip_candidate_no_load_gate,
                 grip_intervention_step=args.grip_intervention_step,
+                stall_tighten=(
+                    None
+                    if not args.stall_tighten_step
+                    else {
+                        "step": args.stall_tighten_step,
+                        "interval_s": args.stall_tighten_interval_s,
+                        "floor_pos": args.stall_tighten_floor,
+                        "window_s": args.stall_window_s,
+                        "motion_epsilon": args.stall_epsilon,
+                    }
+                ),
                 action_step_repeat=args.action_step_repeat,
                 max_steps=args.max_steps,
                 start_joints=start_values,
@@ -1239,6 +1290,24 @@ def main():
             print(
                 f"[correction] press {args.takeover_key!r} to toggle PV takeover; "
                 "only takeover windows are added to the correction dataset"
+            )
+        if args.stall_tighten_step:
+            stall_tighten = StallTightenRamp(
+                TightenRampConfig(
+                    step=args.stall_tighten_step,
+                    interval_s=args.stall_tighten_interval_s,
+                    floor_pos=args.stall_tighten_floor,
+                ),
+                stall=StallConfig(
+                    window_s=args.stall_window_s,
+                    motion_epsilon=args.stall_epsilon,
+                ),
+            )
+            print(
+                f"[stall ramp] no-learning baseline: after {args.stall_window_s:g}s of still "
+                f"body commands, tighten {args.stall_tighten_step:g} every "
+                f"{args.stall_tighten_interval_s:g}s down to a floor of "
+                f"{args.stall_tighten_floor:g}, then hand back to ACT"
             )
         if args.grip_intervention_step:
             grip_intervention = GripInterventionController(
@@ -1378,6 +1447,7 @@ def main():
             actual_gripper = float(obs["gripper.pos"])
             grip_intervention_label = None
             grip_candidate_control = None
+            stall_tighten_label = None
             if takeover and bool(pv_valid[0]):
                 a[gripper_index] = grip_feedback.update(
                     policy_target=float(a[gripper_index]),
@@ -1395,6 +1465,17 @@ def main():
                 a[gripper_index], grip_intervention_label = grip_intervention.update(
                     policy_target=float(a[gripper_index]),
                     actual_pos=actual_gripper,
+                )
+            elif stall_tighten is not None:
+                # The stall is read from the body targets ACT just predicted,
+                # not from readback: a joint holding a load under gravity is
+                # never still in readback, and the standing command-to-readback
+                # offset would read as motion at every step.
+                a[gripper_index], stall_tighten_label = stall_tighten.update(
+                    t=time.perf_counter(),
+                    policy_target=float(a[gripper_index]),
+                    actual_pos=actual_gripper,
+                    body_command=np.delete(a, gripper_index),
                 )
             elif grip_candidate_trial is not None:
                 a[gripper_index], grip_candidate_control = grip_candidate_trial.update(
@@ -1506,6 +1587,7 @@ def main():
                         }
                     ),
                     grip_intervention=grip_intervention_label,
+                    stall_tighten=stall_tighten_label,
                     command_sent=command_sent,
                 )
             if grip_intervention is not None:
