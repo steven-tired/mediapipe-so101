@@ -1269,6 +1269,46 @@ No checkpoint is approved for actuation. The grip head still must not command th
 motor.
 
 
+## What the grip head is for
+
+Stated 2026-09-02, and it is narrower than "help ACT lift". The objective is the
+**minimum sufficient grip**: lift the carton reliably *and* deform it as little
+as possible. A grasp that lifts by crushing is a failure of this objective even
+though it is a successful lift.
+
+Three things follow, and they change earlier sections rather than adding to them.
+
+**The crush bound is no longer the thing to find.** 2026-09-01 concluded that
+the tight side had no labelled example and possibly no sensor, and that a head
+should train the loose bound only and treat the tight side as a fixed floor.
+That still holds as a *safety* stop, but it is no longer the operating rule. The
+target is the lift boundary approached from the loose side with a margin: the
+loosest grasp that still lifts. No crush sensor is needed to define that, which
+removes the blocker rather than working around it.
+
+**The 2.0 tighten step is now a cost, not only a resolution limit.** A ramp that
+steps past the lift boundary overshoots it by up to one full step, and at 38%
+delivery a 2.0 command overshoot is about 0.79 of extra jaw travel driven into
+the carton. So the stall-and-tighten baseline systematically over-squeezes by up
+to that much, by construction. It will still be the honest control for *whether*
+a lift happens; it is a poor control for *how gently*, and its own trials should
+be read that way.
+
+**The loosen branch matters more than the tighten branch for this objective.**
+Loosening resolves at 0.5 and delivers 90%; tightening resolves at 2.0 and
+delivers 38%. Approaching the minimum grip from the tight side by loosening is
+therefore about four times finer than approaching it from the loose side by
+tightening. The paired protocol already loosens after every lift; that step now
+has a second purpose, and the interval between where a grasp lifts and where it
+slips is the window the head is being asked to sit inside.
+
+We have no calibrated force measurement. The usable proxies, best first, are jaw
+depth relative to that trial's own lift boundary; `Present_Load` and
+`Present_Current`, which respond weakly (rho about 0.45, and current only while
+tightening); and carton deformation, which is visible in the dual-view video but
+has never been scored. Any claim about "less pressure" has to name which of
+these it rests on.
+
 ## Gripper deadband calibration on 2026-09-02
 
 Gate 1 of the 2026-09-01 list. Run with `run_gripper_deadband.sh --arm-enabled
@@ -1366,7 +1406,10 @@ against the calibrated steps:
 
 1. Run the stall-and-tighten baseline at `--stall-tighten-step 2` over 8 to 10
    trials and measure its no-lift rate against the current 50%. No learned head
-   is worth deploying until it beats this.
+   is worth deploying until it beats this. Record the final depth of every
+   trial as well: the baseline over-squeezes by up to one step by construction,
+   so that column is the reference the minimum-sufficient-grip objective has to
+   improve on, separately from the lift rate.
 2. Collect paired lift and slip boundaries with the two-branch protocol,
    tightening at `2.0` and loosening at `0.5`.
 3. Before training any head, report single-feature AUC for the lift and slip
