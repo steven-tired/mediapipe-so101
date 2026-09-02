@@ -180,3 +180,34 @@ history and were preserved only by the migration backup's `working-state/` tree.
 | Destination | Source | Notes |
 | --- | --- | --- |
 | _(filled in as packages are migrated)_ | | |
+
+## The source tree is gone — 2026-09-02
+
+The `hand-teleop` meta-workspace this repository was carved out of no longer
+holds the tree these paths point into. `webcam-input/`, the pre-split source of
+both this repository and the private `ir-camera-force`, was **retired**: moved
+to `.retired/20260902/` on the development machine, never deleted, with its
+`ir-hand-pressure-so101-teleop` worktree alongside it and `git worktree repair`
+run on both. Its history is in a verified bundle and its uncommitted state in
+dated tarballs. The source paths in the tables above therefore describe where
+things came from, not where they are.
+
+Retiring it required first replacing three editable installs in the LeRobot
+environment that pointed *into* that tree. While they existed they were a silent
+fallback — setuptools' `_EditableFinder` sits after `PathFinder` on
+`sys.meta_path`, so any submodule this repository was missing got served from
+the pre-split tree instead of raising, and one had been (see
+`RELEASE_AUDIT.md`). `test_no_module_comes_from_outside_this_repo.py` now
+asserts completeness statically, which is the only form of that question that
+survives the old tree going away.
+
+The migration is closed. Its full execution record — what moved where, what was
+deliberately kept, and where the plan's route was departed from — lives with the
+workspace, outside any repository, so the durable summary is here:
+
+| | |
+| --- | --- |
+| this repository | `steven-tired/mediapipe-so101` |
+| private counterpart | `steven-tired/ir-camera-force` |
+| retired | FLIR and Lepton trees (2026-09-01), `webcam-input` (2026-09-02) |
+| deliberately not retired | the thermal calibration tree, whose detached run worktrees share an object store with material the private repo reads |
