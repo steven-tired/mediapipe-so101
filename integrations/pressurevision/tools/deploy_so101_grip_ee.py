@@ -561,11 +561,16 @@ class PairedBoundaryOperator:
             self.protocol.set_tighten(not self.protocol.tighten_engaged)
             print(f"[paired] tighten {'ENGAGED' if self.protocol.tighten_engaged else 'released'}")
         elif key == ord("l"):
-            self.protocol.confirm_lift()
-            print("[paired] lift confirmed; loosening starts")
+            # Only in the phase where it means something. Repeating the print
+            # for presses the protocol ignores makes the log read as if the
+            # loosen ramp restarted three times.
+            if phase == "following":
+                self.protocol.confirm_lift()
+                print("[paired] lift confirmed; loosening starts")
         elif key == ord("d"):
-            self.protocol.mark_drop()
-            print("[paired] drop marked; loosening ends")
+            if phase == "loosening":
+                self.protocol.mark_drop()
+                print("[paired] drop marked; loosening ends")
         elif key in {ord("q"), 27}:
             self.stop = True
 
