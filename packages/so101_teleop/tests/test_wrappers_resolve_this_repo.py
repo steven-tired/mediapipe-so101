@@ -20,8 +20,8 @@ WRAPPERS = sorted(p for p in SCRIPTS.glob("*.sh") if p.name not in {"_common.sh"
 
 def test_the_expected_wrappers_exist():
     assert {p.name for p in WRAPPERS} == {
-        "run_arm_ee.sh", "run_record_ee.sh", "run_deploy_ee.sh",
-        "run_diagnose.sh", "view_camera.sh",
+        "run_arm_ee.sh", "run_record_ee.sh", "run_record_pv_ee.sh",
+        "run_deploy_ee.sh", "run_diagnose.sh", "view_camera.sh",
     }
 
 
@@ -64,10 +64,16 @@ def test_no_wrapper_hardcodes_a_developer_path():
 # wrapper made deploy fail with "No CUDA GPUs are available".
 CPU_ONLY = {"run_arm_ee.sh", "run_record_ee.sh", "view_camera.sh"}
 NEEDS_GPU = {"run_deploy_ee.sh", "run_diagnose.sh"}
+# A wrapper that starts two processes with opposite needs cannot answer this
+# question once for the whole script: the PV recorder is CPU-only, its sender
+# runs the PressureVision network. It hides the GPU per-invocation instead,
+# which test_record_so101_pv_ee checks at the source level -- running it for
+# real needs a fitted levels.json and two cameras.
+MIXED_GPU = {"run_record_pv_ee.sh"}
 
 
 def test_the_gpu_policy_covers_every_wrapper():
-    assert CPU_ONLY | NEEDS_GPU == {p.name for p in WRAPPERS}
+    assert CPU_ONLY | NEEDS_GPU | MIXED_GPU == {p.name for p in WRAPPERS}
 
 
 def _cuda_visible_devices(wrapper, tmp_path):

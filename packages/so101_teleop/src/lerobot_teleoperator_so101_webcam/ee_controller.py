@@ -206,6 +206,7 @@ class WebcamEEController:
         self.pipeline = None
         self.ref = None
         self.roll_ref = None
+        self.last_pinch = 0.0
         self.prev_enabled = False
         self.smoothed = None
         self.gripper = gripper or MediaPipeGripperController(
@@ -298,6 +299,10 @@ class WebcamEEController:
 
         lm = np.asarray(landmarks.landmarks, dtype=float)
         pinch = float(np.linalg.norm(lm[_THUMB_TIP] - lm[_INDEX_TIP]))
+        # Kept for the caller: a recorder writing telemetry needs the pinch that
+        # produced this frame's command, and recomputing it would be a second
+        # source of truth.
+        self.last_pinch = pinch
         roll_delta = (
             bounded_wrist_roll_delta(
                 wrist.quaternion,
