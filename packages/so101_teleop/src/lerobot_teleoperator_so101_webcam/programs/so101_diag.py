@@ -116,17 +116,28 @@ def cmd_health(_):
 def cmd_ids(_):
     bus = raw_bus()
     print("pinging motor ids 1..6 (x10) -- finds loose daisy-chain connectors:")
+    # `bus.ping()` takes raise_on_error=False by default and RETURNS None for a
+    # motor that does not answer. Counting only exceptions therefore reported
+    # "missed 0/10 ok" for every id including ones the handshake could not find
+    # at all -- the one thing this command exists to detect. Check the returned
+    # model number, and treat an exception as a miss too.
     miss = {i: 0 for i in NAMES.values()}
+    models = {i: set() for i in NAMES.values()}
     for _ in range(10):
         for i in NAMES.values():
             try:
-                bus.ping(i)
+                model = bus.ping(i)
             except Exception:
+                model = None
+            if model is None:
                 miss[i] += 1
+            else:
+                models[i].add(int(model))
         time.sleep(0.05)
     for n, i in NAMES.items():
         flag = "  <-- DROPPING/ABSENT" if miss[i] else "  ok"
-        print(f"  id {i}  {n:14s} missed {miss[i]}/10{flag}")
+        seen = ",".join(str(m) for m in sorted(models[i])) or "-"
+        print(f"  id {i}  {n:14s} missed {miss[i]}/10  model={seen}{flag}")
     bus.disconnect(disable_torque=False)
     print("\nAny non-zero 'missed' = a flaky connector at or before that motor in the chain "
           "(reseat the cables on both sides).")
