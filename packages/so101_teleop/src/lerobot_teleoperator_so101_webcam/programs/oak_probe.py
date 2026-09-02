@@ -4,9 +4,9 @@ Stereo depth needs a left+right mono pair (sockets CAM_B / CAM_C). If only
 CAM_A (RGB) is present it is an OAK-1, there is no depth, and the OAK depth
 plan is impossible.
 
-This does not move the arm. It is the first thing to run against the open OAK
-gate: `oak_camera.py` targets the depthai v3 API while the environment has
-depthai 2.32, so this probe is also where that mismatch shows up first.
+This does not move the arm. `oak_camera.py` now speaks both the depthai v2 and
+v3 pipeline APIs and picks by installed version, so a version mismatch is no
+longer what this probe is looking for -- it answers the hardware question only.
 
 Run:  ./scripts/probe_oak.sh
 """

@@ -18,3 +18,6 @@
 *.swp
 .idea/
 .vscode/
+
+# depthai writes crash dumps and telemetry here when an OAK is opened.
+/.cache/
