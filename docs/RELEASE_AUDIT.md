@@ -240,6 +240,11 @@ evidence is unaffected; only the ability to record more of it is gone.
   Steps 1a, 1b and 2 pass with evidence. Step 1c has only partial evidence,
   step 1d **fails**, and step 3 was not run. Per the rule at the end of the
   procedure, partial success is not a pass.
+- **Four exit-path and key-semantics fixes are written but unrun.** They change
+  runtime behaviour on the hardware-verified deploy path, so they are held
+  behind a gate rather than committed with the readability work. The defects and
+  the procedure are in "Deploy exit paths and key semantics — gate not yet run"
+  below.
 - **PressureVision comparison study unfinished.** See `CLAIMS_AND_GATES.md`.
 
 ### Closing the PressureVision gate
@@ -400,6 +405,108 @@ An eleventh defect was introduced *during* this session and fixed here: tighteni
 which is a real state before the first PV packet, and crashed a recording. The
 lesson runs both ways — the point is to distinguish a legitimate absent state
 from a misspelled field, not to prefer one style of access.
+
+## Deploy exit paths and key semantics — gate not yet run
+
+Found 2026-09-02 by a read-through of `integrations/pressurevision/tools/deploy_so101_grip_ee.py`
+(batch 5b of `PV_TOOLS_REFACTOR_PLAN.md`). None of the four is fixed in the tree:
+each changes what the arm does at a moment that has already been verified on
+hardware, so the fix and the run belong together, in one PR, with the result
+written here per item. **Batches 1 through 5a of that plan carry none of this
+risk** — they are renames, verbatim extractions, comments, and argparse
+rejections that happen before any device is opened.
+
+Line numbers are as of commit `4c7408b`.
+
+### 5b.1 Ctrl-C during the relax countdown skips `robot.disconnect()` — HIGH
+
+`relax_all_joints()` (`deploy_so101_grip_ee.py:1016`) prints "Ctrl-C within 3s if
+you are not holding it" and then sleeps. It is called from the `finally` block at
+`2099`. An operator who takes that offer raises `KeyboardInterrupt` *inside*
+`finally`, which propagates and skips `robot.disconnect()` at `2101`: the joints
+stay energised and the serial port is never closed. That is the exact state the
+function's own docstring exists to prevent — wrist_roll energised, drawing
+current, and the next run dying at connect on a missing id 5, which has now
+happened four times.
+
+Fix: wrap only the relax, so the interrupt skips the relax and not the
+disconnect.
+
+```python
+if args.relax_on_exit:
+    try:
+        relax_all_joints(robot)
+    except KeyboardInterrupt:
+        print("[deploy] relax cancelled by operator; torque held.")
+robot.disconnect()
+```
+
+Gate: run `--arm-enabled --max-steps 0`, press Ctrl-C during the countdown.
+Expect torque still on, and the port released — `ls /dev/serial/by-id/` followed
+by an immediate reconnect must succeed.
+
+### 5b.2 `q` now relaxes the arm on grip-intervention runs — HIGH
+
+The loop stop condition at `1785` includes `grip_intervention.stop`, set by
+`q`/Esc at `375`. Stopping that way reaches the relax at `2099`, so the arm goes
+limp and drops what it is holding. Before the stall-ramp work, `q` on this path
+disconnected with torque held — "so the arm keeps its pose", still the comment at
+`2100`. The window legends at `315` and `357` still say `q stop` with no mention
+of going limp, and the 3-second warning prints to a terminal the operator is not
+looking at.
+
+Fix, either: (a) drop `grip_intervention.stop` from the `1785` condition and
+restore the old semantics; or (b) keep it, draw the warning into the cv2 window,
+and change both legends to `q stop (arm relaxes)`. (a) is the smaller change and
+matches what the operator already expects.
+
+Gate: with an object gripped on an intervention run, press `q`. Expect the object
+not to drop.
+
+### 5b.3 One key both abandons and confirms the tighten ramp — MEDIUM
+
+The standalone ramp's banner (`1712`) says "Press 'A' again to hand back to ACT",
+and `TightenRampOperator` treats `a` as a plain toggle. But
+`StallTightenRamp.update(engaged=False)` records
+`self.lift_boundary = actual_pos` whenever any steps were applied. So the
+operator who tightens, sees the carton still will not come up, and follows the
+banner writes a `lift_boundary` into the evidence that cannot be told apart from
+a real one. `PairedBoundaryProtocol` avoids this by splitting the keys — `A`
+tightens, `S` confirms the lift; the standalone path never got the split.
+
+Fix: give the standalone path the same split, in `TightenRampOperator`
+(`deploy_so101_grip_ee.py:461-514`) and the disengage branch of
+`StallTightenRamp.update`. Leaving without `S` must record
+`lift_boundary = None` and say so on stdout.
+
+Gate: one successful lift (press `S`) and one abandoned ramp (press `A` only).
+Expect `stall_tighten_result.lift_boundary` to be a number and `null`
+respectively.
+
+### 5b.4 Two paired-protocol branches return a stale ACT gripper target — MEDIUM
+
+While `freeze_body` holds, `a = last_predicted_action.copy()` and the policy is
+not re-run, so the `policy_target` handed to `paired.update()` is the gripper
+command from *before* the lift. `PairedBoundaryProtocol.update`
+(`packages/so101_teleop/src/lerobot_teleoperator_so101_webcam/grip/runtime.py`)
+returns that value unchanged on `lift_unconfirmed` (`:550`) and `drop_marked`
+(`:564`), while every neighbouring branch returns `self._target`. The command
+therefore jumps in one cycle from where the loosen ramp left the jaw back to
+ACT's grasp value — a full close, with the carton still in the jaw on the `W`
+path, directly contradicting the operator hint that "the jaw stays where it is".
+
+Fix: return the jaw's own position on both branches. Note `lift_unconfirmed`
+sets `self._target = None` immediately above its return, so that branch must
+return `actual_pos`, not `self._target` — `_record` maps `None` to `0.0`, which
+would command the jaw fully closed.
+
+Gate: grip an object, enter the loosen ramp, press `F` (drop) once and `W` (undo)
+once. Expect no jump in the gripper command across either keypress.
+
+### If this gate is run
+
+Record each item as PASS or FAIL here in the format the sections above use, and
+**leave the gate open if any item fails.** Partial success is not a pass.
 
 ## Environment note
 
