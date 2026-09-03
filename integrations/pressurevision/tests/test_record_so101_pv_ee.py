@@ -403,7 +403,7 @@ def test_recording_hand_gate_seeds_controller_from_current_pose_without_ready_mo
 def test_final_review_closes_teleop_before_session_finalization():
     source = inspect.getsource(recorder.run_recording)
     start = source.index("session_complete =")
-    review_branch = source[start : source.index("status =", start)]
+    review_branch = source[start : source.index("keep = _choose_keep(", start)]
 
     assert "args.episodes == 1" in review_branch
     assert review_branch.index("teleop.close_preview()") < review_branch.index(

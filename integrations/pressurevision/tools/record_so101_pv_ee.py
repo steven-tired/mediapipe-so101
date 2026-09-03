@@ -1239,11 +1239,11 @@ class PVRecorderTeleop(Teleoperator):
             )
             height, width = panel.shape[:2]
             cv2.rectangle(panel, (0, height - 30), (width, height), (0, 0, 0), -1)
-            anchor = self.pv.adjustment_anchor_target
+            banner_anchor = self.pv.adjustment_anchor_target
             if self.pv.adjustment_locked:
-                pv_status = f"PV LOCKED q={anchor:.1f}"
-            elif anchor is not None:
-                pv_status = f"PV ADJUST q<={anchor:.1f}"
+                pv_status = f"PV LOCKED q={banner_anchor:.1f}"
+            elif banner_anchor is not None:
+                pv_status = f"PV ADJUST q<={banner_anchor:.1f}"
             else:
                 pv_status = "PV ADJUST LIVE"
             measured_gripper = (
@@ -1547,14 +1547,13 @@ def run_recording(args: argparse.Namespace) -> int:
     backup = None
     dataset = None
     recorded = 0
-    status = "aborted"
     sidecar_path = evidence.path / "pv_shadow.csv"
     try:
         backup = snapshot_dataset(dataset_root)
         dataset_mode = checked["dataset_mode"]
         if dataset_mode == "reset_empty":
             reset_empty_dataset_root(dataset_root)
-            dataset_mode = "create"
+        open_mode = "create" if dataset_mode == "reset_empty" else dataset_mode
         cfg = SO101WebcamEEConfig(camera_index=args.hand_camera)
         source = WebcamSource(
             WebcamWristEstimator(
@@ -1585,12 +1584,12 @@ def run_recording(args: argparse.Namespace) -> int:
                 resources.callback(source.stop)
                 source.start_oak()
             robot.connect(calibrate=False)
-            preview = PressureVisionPreviewSource(args.pv_preview_share)
-            resources.callback(preview.close)
+            pv_preview = PressureVisionPreviewSource(args.pv_preview_share)
+            resources.callback(pv_preview.close)
             wait_for_continuous_hand_tracking(
                 source,
                 robot,
-                preview,
+                pv_preview,
                 preview=not args.no_preview,
             )
             motors = list(robot.bus.motors.keys())
@@ -1649,7 +1648,7 @@ def run_recording(args: argparse.Namespace) -> int:
                 pv,
                 source,
                 robot,
-                preview,
+                pv_preview,
                 sidecar,
                 evidence,
                 preview=not args.no_preview,
@@ -1671,7 +1670,7 @@ def run_recording(args: argparse.Namespace) -> int:
                     "formal PV recorder requires front+side image schema; "
                     f"got {sorted(image_features)}"
                 )
-            if dataset_mode == "resume":
+            if open_mode == "resume":
                 dataset = LeRobotDataset.resume(args.repo_id, root=dataset_root, image_writer_threads=4)
                 validate_dataset_schema(dataset.features, features)
             else:
@@ -1690,10 +1689,9 @@ def run_recording(args: argparse.Namespace) -> int:
             # / zero / one positions and the filter cutoff, the teacher column is
             # a number with no scale. The evidence manifest keeps its own copy.
             write_dataset_mapping_contract(dataset_root, pv.mapping_contract)
-            recording_dataset = PVTeachingDatasetView(dataset, teleop)
+            teaching_view = PVTeachingDatasetView(dataset, teleop)
             resources.callback(dataset.finalize)
             teleop.connect()
-            resources.callback(lambda: None)
             listener, events = init_keyboard_listener()
             teleop.set_events(events)
             if listener is not None:
@@ -1716,7 +1714,7 @@ def run_recording(args: argparse.Namespace) -> int:
                     robot_action_processor=identity_action,
                     robot_observation_processor=identity_observation,
                     teleop=teleop,
-                    dataset=recording_dataset,
+                    dataset=teaching_view,
                     control_time_s=args.episode_seconds,
                     single_task=args.task,
                     display_data=False,
@@ -1824,7 +1822,9 @@ def run_recording(args: argparse.Namespace) -> int:
                 if session_complete:
                     teleop.disconnect()
                     break
-            status = "normal" if not events["stop_recording"] else "stopped"
+            # The session status written at close() below is keep/roll-back.
+            # Whether the operator stopped early is already recorded per attempt
+            # by evidence.outcome(), so it is not summarised a second time here.
             keep = _choose_keep(args, recorded)
         analyzer = run_analyzer(sidecar_path, evidence.path)
         dispose_dataset_session(dataset_root, backup, keep=keep)
