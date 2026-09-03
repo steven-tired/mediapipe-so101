@@ -2,8 +2,10 @@
 
 Single-webcam hand tracking driving an [SO-101](https://github.com/TheRobotStudio/SO-ARM100)
 arm: live end-effector teleoperation, [LeRobot](https://github.com/huggingface/lerobot)
-dataset recording, and policy deployment. PressureVision-based grip control is an
-optional integration.
+dataset recording, and policy deployment, plus an ongoing line of work on
+**how hard to close the gripper** on a deformable object — which is what the
+optional PressureVision integration and the servo-level grip calibration are
+both for.
 
 A commodity webcam plus MediaPipe replaces a VR headset as the input device. The
 operator's right wrist pose drives the arm through inverse kinematics; pinch drives
@@ -24,6 +26,9 @@ operator tested.
 | PV pad rig: aim, rematch, capture, fit, serve | `./scripts/run_pv_pad.sh` | yes |
 | PV-supervised recording (grip severity from pressure) | `./scripts/run_record_pv_ee.sh` | partly — see below |
 | PV grip-supervised deployment | `./scripts/run_deploy_grip_ee.sh` | no |
+| Gripper step/deadband calibration | `./scripts/run_gripper_deadband.sh` | yes |
+| First-contact probe (effort onset) | `run_gripper_deadband.sh --mode contact` | no — written, not yet run |
+| Paired lift/slip boundary collection | `./scripts/run_paired_boundaries.sh` | yes, 11 trials |
 | OAK-D depth hand tracking (opt-in) | `--oak` / `probe_oak.sh` | yes, on depthai 2.32 |
 
 ## Data and policies
@@ -104,7 +109,10 @@ packages/webcam_input/            the input device, robot-free
 packages/so101_teleop/            everything that touches the arm
   ee_controller.py                the control frame: pose -> IK -> joint targets
   ee_control.py                   grip ratchet, span mapping, bounded wrist roll
-  grip/                           gripper contract; the MediaPipe implementation
+  grip/                           gripper contract; the MediaPipe implementation;
+                                  the stall/tighten ramp and paired-boundary protocol
+  gripper_hardware.py             servo-level grip measurement: step resolution,
+                                  contact onset, compression strain
   programs/                       teleop, record, deploy, diagnostics, probes
   paths.py                        resolves SO-ARM100 URDF and local storage
 
@@ -114,7 +122,10 @@ integrations/pressurevision/      optional, runs as a SEPARATE process
   src/pressurevision_integration/ protocol, adjustment lock, range mapping,
                                   grip runtime/adapter, shadow telemetry
   tools/                          the sender, the pad rig, the PV recorder,
-                                  trial analyzers
+                                  trial analyzers, and `deploy_so101_grip_ee.py` --
+                                  the grip-supervised deploy program, which also
+                                  hosts the operator protocols that collect grip
+                                  boundaries with no PV process running at all
 
 scripts/                          run wrappers; they resolve this repo and the
                                   right interpreter, so never use `python -m`
@@ -244,7 +255,7 @@ Then calibrate the arm once with LeRobot's own tooling
 ### 5. Check it
 
 ```bash
-python -m pytest -q                    # 987 tests, no hardware needed
+python -m pytest -q                    # 1086 tests, no hardware needed
 ./scripts/probe_oak.sh                 # only if you have an OAK-D
 ./scripts/view_camera.sh --profile dp100
 ./scripts/run_arm_ee.sh                # first motion; keep the e-stop in reach
@@ -374,6 +385,36 @@ shift that the policy sees and **nothing reports**. Align first, every time.
 set does not match before the robot connects, rather than after the arm has
 started moving.
 
+## Grip: the problem this line of work exists for
+
+A policy trained on teleoperated demonstrations commands **one number** for the
+gripper, and on a deformable object a fixed number is wrong in both directions.
+The carton this repository picks is a paper box: close too little and it slips
+out on the way up, close too much and it is crushed. The recorded ACT
+checkpoints do both, and that is what the whole grip line — PressureVision, the
+grip-intent head, the servo calibration below — is trying to fix.
+
+The objective is stated deliberately narrowly, because "grip better" is not
+measurable: the **minimum sufficient grip**. Lift the carton reliably *and*
+deform it as little as possible. A grasp that lifts by crushing fails this
+objective even though it is a successful lift.
+
+There are two candidate channels for the signal that would let a policy hit that
+target, and this repository has built both:
+
+| Channel | What it senses | Where it can act | State |
+| --- | --- | --- | --- |
+| **PressureVision** | the *operator's* fingertip pressure, from an overhead camera watching a paper pad | teleoperation only — the operator is in the loop | rig calibrated and running; supplies the `grip_intent_teacher` column in recorded episodes |
+| **The servo itself** | jaw position (encoder) and `Present_Load` / `Present_Current` on all six joints | autonomous deployment — no operator | calibrated 2026-09-02; boundaries being collected |
+
+**PressureVision is a labelling instrument, not a controller for autonomy.** It
+cannot run when the arm runs alone, because it is watching a human hand. Its job
+is to put a *human's* notion of "squeeze harder / softer" into the dataset as a
+supervision column, so a head can be trained to produce that number from what
+the robot alone can see. That is the answer to "what is PV for": it is how the
+teacher's intent gets recorded, and nothing about it survives into the deployed
+policy except the head it trained.
+
 ### PressureVision grip control
 
 PV supplies grip *severity* only, while a MediaPipe grasp is active. It can
@@ -471,7 +512,55 @@ session ends. Ending is also how the grip is released: the gripper is commanded
 open before the bus closes, because dropping torque alone does not open a jaw
 held by gear friction.
 
-### When the arm misbehaves
+### Measuring the grasp at the servo
+
+The channel that survives into autonomy. Two programs, both requiring the arm
+and both writing their evidence under `local/evidence/`.
+
+```bash
+./scripts/run_gripper_deadband.sh --arm-enabled            # what a step is worth
+./scripts/run_gripper_deadband.sh --mode contact --arm-enabled   # where contact begins
+./scripts/run_paired_boundaries.sh                         # lift and slip, in one grasp
+```
+
+**The gripper is strongly asymmetric, and that decides the protocol.** Measured
+2026-09-02 on the carton, by commanding equal-travel staircases in each
+direction and requiring *every* tread to move:
+
+| Direction | Smallest resolvable step | Delivered travel |
+| --- | --- | --- |
+| loosen | **0.5** | 90–95% of command |
+| tighten | **2.0** | ~38% of command |
+
+Tightening is not deadband-limited but compliance-limited — the command lands,
+the jaw does not travel, because the carton and the gearbox absorb it. The
+consequence is structural: **the tighten step (2.0) is wider than the window it
+would have to hit.** Across paired trials, the distance from where a grasp lifts
+to where it starts to slip has a median of about **1.3**. So the lift boundary
+cannot be measured by tightening into it, and the measurement is taken on the
+way back out, by loosening at 0.5 until the carton slips.
+
+`run_paired_boundaries.sh` is that protocol: the operator drives the arm's
+policy, presses a key when the carton is airborne, and the program then loosens
+in 0.5 steps while the operator marks **slip onset** and **drop** as separate
+events. All three boundaries are recorded from *readback*, not command, because
+only about 90% of a loosen command becomes travel. A boundary reached against
+the ramp's own floor is flagged `lift_boundary_floor_limited` — six early trials
+agreed to sd 0.30 purely because they all bottomed out on the same floor, and
+that was briefly mistaken for a physical constant.
+
+**The measured damage ceiling.** Driving the jaw to a readback near **21.3**
+left a visible (recoverable) dent, and every boundary in that trial moved with
+it: a flattened carton is thinner, so it needs a tighter jaw for the same real
+grip. Boundaries are therefore only comparable within one floor setting.
+
+`--mode contact` closes slowly from free space and looks for the position where
+`Present_Current` / `Present_Load` leave their free-space noise band. That
+position is the `x0` a compression-strain bound would be measured against —
+if it is detectable on this hardware, a strain limit replaces the hand-tuned
+floor, and stops being a number retuned per object.
+
+## When the arm misbehaves
 
 ```bash
 ./scripts/run_so101_diag.sh ids      # ping every servo; finds a dropping one
@@ -519,7 +608,7 @@ The core packages import and run without PressureVision installed.
 ## Tests
 
 ```bash
-python -m pytest -q     # 987 tests, no robot and no cameras required
+python -m pytest -q     # 1086 tests, no robot and no cameras required
 ```
 
 The suite is robot-free by construction. That is also its limit: the physical
