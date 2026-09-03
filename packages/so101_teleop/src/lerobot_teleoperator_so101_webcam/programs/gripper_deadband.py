@@ -227,6 +227,18 @@ def probe_contact(robot, *, body, args, started_at, samples) -> dict:
             "as the baseline."
         )
 
+    # Travel to the start and throw that dwell away. The jaw opens well past
+    # --probe-from, so the first tread would otherwise carry the whole slew into
+    # the baseline: on 2026-09-03 a 95 -> 60 arrival read current 5.62 and load
+    # 230 against a free-space 0.56 and 30.9, which put the baseline spread at
+    # +/-5.62 and +/-203 and made the onset threshold unreachable for the rest of
+    # the sweep. Same shape as the settle transient in deadband mode.
+    print(f"travelling {start:.3f} -> {args.probe_from:g} and settling {args.settle_s:g}s "
+          "before the baseline")
+    dwell(robot, body=body, gripper_pos=args.probe_from, seconds=args.settle_s, hz=args.hz,
+          arm_enabled=args.arm_enabled, started_at=started_at,
+          max_current=args.max_current, max_temperature=args.max_temperature, samples=samples)
+
     print(f"closing {args.probe_from:g} -> {args.probe_to:g} in {args.probe_step:g} steps, "
           f"{args.probe_dwell_s:g}s each")
     treads: list[dict] = []

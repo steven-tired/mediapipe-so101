@@ -27,6 +27,12 @@ for another:
 - **A visible carton dent at a readback near `21.3`.** One operator observation, not an
   instrument reading, and it moved every boundary in that trial. It bounds the objective
   from the tight side and makes boundaries comparable only within one floor setting.
+- **First contact is detectable at the servo, 2026-09-03.** Swept from free space, both
+  `Present_Current` and `Present_Load` separate the carton from an empty jaw by about ten
+  sigma at depth; two independent empty-jaw sweeps agree to within their own spread. First
+  contact on this carton is a readback of about `50`, which puts the lift boundary at `24`
+  units of compression and the dent at `29`. A fast close still detects contact but places
+  it six units too open, so `x0` must be taken by a slow probe before the grasp.
 
 ## Verified in software only
 
@@ -50,11 +56,13 @@ for another:
   paired-boundary collection that would supply its labels is at n=11 trials, and only
   n=3 at the current floor setting; the carton's position is the only variable that has
   been changed, so a head trained on this data would have nothing to condition on.
-- **Detectable first contact.** `run_gripper_deadband.sh --mode contact` is written and
-  tested against a simulated servo, but has never run on the arm. Whether
-  `Present_Current` or `Present_Load` rises detectably at first contact is unknown, and
-  it is the prerequisite for replacing the hand-tuned tighten floor with a
-  compression-strain bound.
+- **A repeatable deformation criterion.** First contact is now measured (see the
+  hardware list above), so compression `x0 - x` is computable -- but its upper bound
+  still rests on one operator's eye on one trial. Until deformation is scored the same
+  way twice, a compression bound has no ceiling to enforce.
+- **Portability of compression across carton states.** Whether `x0 - x` at the lift
+  boundary survives the carton being flattened has not been tested. If it does, the
+  eleven paired trials pool into one dataset; if it does not, they stay three groups.
 - **Carton deformation has never been scored.** It is visible in the dual-view video and
   the one damage measurement on record is an operator's eye. Any claim of "less pressure"
   must name whether it rests on jaw depth, on motor effort, or on nothing.

@@ -1546,3 +1546,156 @@ against the calibrated steps:
 
 No checkpoint is approved for actuation. The grip head still must not command
 the motor.
+
+## First contact is measurable, on 2026-09-03 bench evidence
+
+Four sweeps of `run_gripper_deadband.sh --mode contact`, two speeds by two
+conditions, all on the same carton at the same position. The evidence is under
+`local/evidence/smoke/gripper_deadband/20260903_*`.
+
+### The effort channels do see the carton
+
+The open question this probe existed to answer was whether `Present_Current` or
+`Present_Load` rises detectably when the jaw first meets the object. Both do.
+Free space is flat and repeatable -- two independent empty-jaw sweeps at the
+same speed agree to well inside their own spread:
+
+| Empty jaw, 0.15 s per tread | `mean_current` | `mean_load` |
+| --- | --- | --- |
+| run 1 (`113647`) | 0.788 +/- 0.246 | 39.28 +/- 3.33 |
+| run 2 (`113812`) | 0.804 +/- 0.241 | 39.15 +/- 4.21 |
+
+Against that floor the carton is unmistakable. At a readback of `30` the empty
+jaw reads `0.60` current and `41.6` load; with the carton, `3.00` and `79.2`.
+The separation grows monotonically with depth and reaches about ten sigma.
+
+This supersedes the weak result recorded under "Both effort channels do respond
+to depth, weakly" on 2026-09-02. That measurement was taken by stepping deeper
+from an already-loaded grasp, which is the regime where the response is small.
+Swept from free space, it is not weak.
+
+### x0 is about 50, and compression is about 24 before the carton lifts
+
+The slow sweep (`0.8 s` per tread, `112606`) leaves free space at a readback of
+about `50`, taking the departure as the first point where an eight-tread rolling
+mean of both channels stays above three sigma of the free-space distribution.
+
+That number reframes everything else in this file. The lift boundary near `26`
+and the deformation ceiling near `21.3` are not apertures with any meaning of
+their own -- they are `24` and `29` units of **compression** past first contact.
+Aperture depends on how thick the object is; compression does not.
+
+**The experiment that follows from this, and has not been run:** measure `x0`,
+grasp, deliberately flatten the carton, measure `x0` again, grasp again. If
+`c_lift = x0 - x_lift` is preserved while `x_lift` itself moves, then the
+2026-09-02 finding that boundaries are only comparable within one floor setting
+dissolves, and the eleven paired trials can be pooled. Fifteen minutes on the
+arm, and it decides whether the existing dataset is one group or three.
+
+### A fast close detects contact but does not locate it
+
+Repeating the sweep at `0.15 s` per tread -- about the speed a real grasp
+closes -- still separates carton from free space at four to seven sigma. But it
+places the onset at a readback of `56.3` against the slow sweep's `50.0`. Under
+a fast command the position error is larger, so the servo pushes harder the
+moment it meets any resistance, and the rise appears while the jaw is still six
+units short of the object.
+
+So `x0` has to be taken from a slow probe **before** the grasp. That is
+acceptable: measure it once on approach, then compute compression from the
+encoder during the grasp itself, where no probing is possible.
+
+### Two defects in the probe, one fixed
+
+The first run reported `NO detectable contact` on both channels while the
+carton was plainly being squeezed. Two separate causes.
+
+The sweep began by commanding the jaw from wherever it sat -- `95` on one run --
+straight to `--probe-from`, and that arrival was the first baseline tread: it
+read `5.62` current and `230` load against a free-space `0.56` and `30.9`, which
+put the baseline spread at `+/-5.62` and `+/-203` and made the threshold
+unreachable for the rest of the sweep. Same shape as the settle transient in
+deadband mode. **Fixed**: the probe now travels to `--probe-from` and settles
+`--settle-s` there, and throws that dwell away.
+
+The threshold itself is still wrong. `find_contact_onset` takes `spread` as the
+baseline's peak-to-peak and multiplies it by `sigmas`, so the nominal four sigma
+is nearer fourteen standard deviations. On the clean slow sweep it reported
+contact at `26.4`, deep inside hard compression, where the honest answer is
+`50`. It must become a standard deviation, and the crossing test should run on a
+rolling mean rather than single treads -- the analysis above separates the
+curves at three sigma with an eight-tread window. The four sweeps recorded today
+are the regression data for that change: it is correct when it reproduces `50`
+on `112606` and finds nothing on `113647`.
+
+## A direction, not a result: contact, sufficiency and slip as one loop
+
+Written 2026-09-03 as the summer's work closes. None of this is built. It is
+the shape the pieces suggest, recorded so it is not re-derived from scratch.
+
+### Compression as the state variable
+
+Every boundary in this file is currently an aperture, and apertures are not
+comparable between objects or between two states of the same object. Restated as
+`c = x0 - x` they might be. The portability experiment above is the first thing
+to run, because everything below assumes it holds.
+
+### What each channel can and cannot answer
+
+| | Answers | When it can be read | State on 2026-09-03 |
+| --- | --- | --- | --- |
+| Contact | where compression starts | before the grasp, slow sweep | measured |
+| Sufficiency | is it tight enough | while holding | `c` and effort both readable |
+| Slip | is it too loose | after the lift | still an operator pressing `d` |
+
+Two observations about the second and third rows.
+
+**Effort and compression are not independent, and that is the useful part.**
+While holding, effort is a monotone function of `c`, so neither adds much to the
+other. But the *pair* identifies the object: the same `c` at a higher effort is
+a stiffer or heavier object. That pair is the conditioning variable the head has
+never had. The deferred weight experiment should be read this way -- the
+question is not only whether the boundaries move when the carton is filled, but
+whether `(c, effort)` separates the two payloads at all.
+
+**Slip may already be visible in the encoder.** The gripper servo senses its own
+normal force, not the tangential load of the payload, which is why weight does
+not appear there. But a carton sliding out of the jaw gets thinner in the grip,
+and the jaw follows it in: the signature is the readback drifting closed while
+the command is constant. Nothing new needs to be instrumented to test this --
+the eleven paired trials already contain `gripper.pos` for the seconds before
+each operator `d`, and the claim is refuted or supported offline. Falling load on
+`shoulder_lift` is the natural second confirmation.
+
+### The protocol is already the controller
+
+The paired-boundary protocol run by hand since 2026-09-02 is a control law with
+a human standing in for one detector:
+
+1. slow probe on approach, giving `x0`
+2. close to a target compression `c*`
+3. lift; a rise in `shoulder_lift` effort confirms the payload was acquired
+4. loosen in `0.5` steps until the slip detector fires, then back off one step
+
+Step 4 is what makes the grasp minimum-sufficient. It **searches** for the
+boundary rather than predicting it, so it does not depend on a number being
+right in advance.
+
+That reframes the head. Its output is not the grip -- it is `c*`, the starting
+point for step 4, predicted from vision and from `(c, effort)`. A poor
+prediction costs extra loosen steps, not a dropped carton. This also answers the
+objection raised on 2026-09-02 that a learned head would collapse to a constant:
+a constant is a perfectly acceptable *prior* here, because the search corrects
+it.
+
+### What blocks it, in order
+
+1. **An automatic slip detector.** Without it step 4 needs a person. Testable
+   offline today against the existing trials.
+2. **Portability of compression across carton states.** Decides whether the
+   eleven trials are one dataset or three. Fifteen minutes on the arm.
+3. **A repeatable deformation criterion.** The ceiling is one operator's eye on
+   one trial. `c` cannot have an upper bound until this is a measurement.
+
+No checkpoint is approved for actuation, and nothing here changes that. The grip
+head still must not command the motor.
