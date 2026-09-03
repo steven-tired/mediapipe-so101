@@ -3,13 +3,19 @@
 Single-webcam hand tracking driving an [SO-101](https://github.com/TheRobotStudio/SO-ARM100)
 arm: live end-effector teleoperation, [LeRobot](https://github.com/huggingface/lerobot)
 dataset recording, and policy deployment. PressureVision-based grip control is an
-optional integration.
+optional integration: a second, finer input channel for the gripper alone.
 
 A commodity webcam plus MediaPipe replaces a VR headset as the input device. The
 operator's right wrist pose drives the arm through inverse kinematics; pinch drives
 the gripper. The same controller runtime backs preview, live teleoperation, and
 recording, so a recorded action path cannot silently differ from the one the
 operator tested.
+
+The pinch that MediaPipe reads is a coarse signal — it says open or closed, not
+how hard. **PressureVision is the fine control for that one axis:** an overhead
+camera watches the operator's fingertips on a paper pad and reads how hard they
+are pressing, and that becomes the gripper's squeeze. It is a teleoperation
+controller, used when a grasp needs more resolution than a pinch can give.
 
 ## What it can do
 
@@ -114,7 +120,9 @@ integrations/pressurevision/      optional, runs as a SEPARATE process
   src/pressurevision_integration/ protocol, adjustment lock, range mapping,
                                   grip runtime/adapter, shadow telemetry
   tools/                          the sender, the pad rig, the PV recorder,
-                                  trial analyzers
+                                  trial analyzers, and the grip operator
+                                  protocols -- which live here but run with no
+                                  PV process at all
 
 scripts/                          run wrappers; they resolve this repo and the
                                   right interpreter, so never use `python -m`
@@ -244,7 +252,7 @@ Then calibrate the arm once with LeRobot's own tooling
 ### 5. Check it
 
 ```bash
-python -m pytest -q                    # 987 tests, no hardware needed
+python -m pytest -q                    # 1086 tests, no hardware needed
 ./scripts/probe_oak.sh                 # only if you have an OAK-D
 ./scripts/view_camera.sh --profile dp100
 ./scripts/run_arm_ee.sh                # first motion; keep the e-stop in reach
@@ -376,8 +384,21 @@ started moving.
 
 ### PressureVision grip control
 
+This is the fine gripper control described at the top: the operator presses a
+paper pad, an overhead camera reads how hard, and that sets how far the jaw
+closes. It exists because a pinch gesture cannot express force — on a paper
+carton the difference between slipping and crushing is a few units of jaw
+travel, and the operator needs a way to say which one they want.
+
 PV supplies grip *severity* only, while a MediaPipe grasp is active. It can
-squeeze harder or softer; it can never open the gripper or move the arm.
+squeeze harder or softer; it can never open the gripper or move the arm. The
+severity it produces is also written into recorded episodes as
+`observation.grip_intent_teacher`, which is what makes a demonstration carry the
+operator's force intent and not just the resulting position.
+
+Current usage: most recording since 2026-09 has run without PV while the
+servo-side measurements below are being collected, but the controller is intact
+and is the path used whenever a grasp needs that resolution.
 
 **1. Build the rig.** A sheet of **white paper flat on the table** is the pad —
 that is the whole surface. Mount the pad camera (a C270 here) **overhead**,
@@ -490,6 +511,30 @@ upstream of it.
 and temperature alongside the predicted action, for separating "the policy is
 wrong" from "the arm is not doing what it was told".
 
+## Current exploration: how hard to close the gripper
+
+Open work as of 2026-09-03, not a workflow: no trained head, nothing wired into
+deployment. On a paper carton a single gripper number is wrong in both
+directions — too little slips, too much dents — and PV cannot answer it for an
+autonomous run, because it needs a human hand in front of it. So the question is
+whether the servo alone can: jaw position from the encoder, and `Present_Load` /
+`Present_Current`.
+
+```bash
+./scripts/run_gripper_deadband.sh                  # step resolution, both directions
+./scripts/run_gripper_deadband.sh --mode contact   # first contact from effort onset
+./scripts/run_paired_boundaries.sh                 # paired lift / slip boundaries
+```
+
+Measured so far: loosening resolves a `0.5` step, tightening only `2.0`
+(compliance, not deadband), and the lift-to-slip window is about `1.3` — which
+is why boundaries are found by loosening, and read back from the servo rather
+than taken from the command. Still unknown: whether effort rises detectably at
+first contact, and whether deformation can be scored at all.
+
+`docs/CLAIMS_AND_GATES.md` and `training/TRAINING_HANDOFF.md` carry the numbers
+and the open gates.
+
 ## The grip safety contract
 
 ```bash
@@ -519,7 +564,7 @@ The core packages import and run without PressureVision installed.
 ## Tests
 
 ```bash
-python -m pytest -q     # 987 tests, no robot and no cameras required
+python -m pytest -q     # 1086 tests, no robot and no cameras required
 ```
 
 The suite is robot-free by construction. That is also its limit: the physical
