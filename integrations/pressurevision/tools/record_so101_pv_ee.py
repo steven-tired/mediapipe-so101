@@ -17,7 +17,6 @@ import json
 from pathlib import Path
 import os
 import shutil
-import sys
 import time
 import uuid
 
@@ -1527,14 +1526,14 @@ def run_stream_preflight(args: argparse.Namespace, *, duration_s: float = 5.0) -
     return 0
 
 
-def run_recording(args: argparse.Namespace) -> int:
-    checked = validate_config(args)
+def _open_evidence_session(args: argparse.Namespace, checked: dict) -> EvidenceSession:
+    """Create or adopt this run's evidence directory, refusing to reuse a used one."""
     evidence_path = args.evidence_dir
     if evidence_path is None:
         evidence_path = create_evidence_session(DEFAULT_EVIDENCE_ROOT)
     elif Path(evidence_path).exists() and any(Path(evidence_path).iterdir()):
         raise ValueError(f"refusing to overwrite non-empty evidence directory: {evidence_path}")
-    evidence = prepare_evidence_session(
+    return prepare_evidence_session(
         evidence_path,
         config=args,
         hashes={
@@ -1543,6 +1542,11 @@ def run_recording(args: argparse.Namespace) -> int:
             "object_profile": checked["profile_sha256"],
         },
     )
+
+
+def run_recording(args: argparse.Namespace) -> int:
+    checked = validate_config(args)
+    evidence = _open_evidence_session(args, checked)
     dataset_root = Path(args.dataset_root)
     backup = None
     dataset = None

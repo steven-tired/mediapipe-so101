@@ -1100,7 +1100,120 @@ def _ready_pose(robot) -> dict:
     return pose
 
 
-def main():
+def _paired_boundaries_summary(paired) -> dict | None:
+    """The paired-boundary evidence record, or None when the run had no protocol."""
+    if paired is None:
+        return None
+    return {
+        "phase": paired.phase,
+        "lift_boundary": paired.lift_boundary,
+        # Read with this: a floor-limited value is the floor
+        # plus compliance, not the depth the carton lifted at.
+        # Tightening is only how the carton gets airborne; the
+        # measurement is the loosen ramp, which resolves 0.5 at
+        # 90% delivery against tightening's 2.0 at 38%.
+        "lift_boundary_floor_limited": paired.tighten_ramp.reached_floor,
+        "tighten_deepest_target": paired.tighten_ramp.deepest_target,
+        "slip_onset_boundary": paired.slip_onset_boundary,
+        "drop_boundary": paired.drop_boundary,
+        "loosen_steps": paired.loosen_steps,
+        "at_ceiling": paired.at_ceiling,
+        # A trial that reached neither is not a failed trial,
+        # it is a trial with nothing to pair. Saying so here
+        # keeps it out of the paired set without a judgement
+        # call later.
+        "paired": (
+            paired.lift_boundary is not None
+            and paired.drop_boundary is not None
+        ),
+    }
+
+
+def _stall_tighten_summary(stall_tighten) -> dict | None:
+    """The stall-ramp evidence record, or None when the ramp was not built."""
+    if stall_tighten is None:
+        return None
+    return {
+        "total_steps_applied": stall_tighten.total_steps_applied,
+        "reached_floor": stall_tighten.reached_floor,
+        "lift_boundary": stall_tighten.lift_boundary,
+        # The deepest the ramp ever commanded, which is the
+        # squeeze the carton actually took. The baseline
+        # overshoots the lift boundary by up to one step by
+        # construction, so this is the reference the
+        # minimum-sufficient-grip objective has to improve on --
+        # separately from whether the lift happened at all.
+        "deepest_target": stall_tighten.deepest_target,
+    }
+
+
+def _close_operator_controllers(
+    *,
+    correction_toggle,
+    stall_operator,
+    paired_operator,
+    grip_intervention,
+    grip_candidate_trial,
+    correction_source,
+    correction_recorder,
+    normal_exit: bool,
+) -> None:
+    """Close every operator window and pressure source the run may have opened."""
+    if correction_toggle is not None:
+        correction_toggle.close()
+    if stall_operator is not None:
+        stall_operator.close()
+    if paired_operator is not None:
+        paired_operator.close()
+    if grip_intervention is not None:
+        grip_intervention.close()
+    if grip_candidate_trial is not None:
+        grip_candidate_trial.close()
+    if correction_source is not None:
+        correction_source.close()
+    if correction_recorder is not None:
+        if normal_exit:
+            correction_recorder.end_segment()
+        else:
+            correction_recorder.discard_pending()
+        correction_recorder.close()
+
+
+def _print_boundary_summary(stall_tighten, stall_operator, paired) -> None:
+    """Print what the run measured, and warn when a label was never recorded."""
+    if stall_tighten is not None:
+        if (
+            stall_operator is not None
+            and stall_operator.engaged
+            and stall_tighten.total_steps_applied
+        ):
+            # The boundary is recorded when the ramp disengages, so a
+            # run that ends still engaged loses the one label it went
+            # out to collect. Say so here rather than letting a null
+            # column look like "the ramp did nothing".
+            print(
+                "[stall ramp] WARNING: the run ended with the ramp still engaged, so "
+                "lift_boundary was never recorded. Press 't' at the lift next time; "
+                "recover this one from control.jsonl."
+            )
+        print(
+            f"[stall ramp] steps={stall_tighten.total_steps_applied} "
+            f"lift_boundary={stall_tighten.lift_boundary} "
+            f"deepest_target={stall_tighten.deepest_target} "
+            f"reached_floor={stall_tighten.reached_floor}"
+        )
+    if paired is not None:
+        print(
+            f"[paired] lift={paired.lift_boundary}"
+            f"{' (FLOOR-LIMITED)' if paired.tighten_ramp.reached_floor else ''} "
+            f"slip_onset={paired.slip_onset_boundary} "
+            f"drop={paired.drop_boundary} "
+            f"loosen_steps={paired.loosen_steps}"
+        )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Every CLI flag this program accepts."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--policy", default=DEFAULT_POLICY, help="HF Hub repo id or local dir")
     # Stable by-id symlink: the arm's /dev/ttyACM* index changes across replugs (was ACM1, then ACM0),
@@ -1250,8 +1363,14 @@ def main():
     ap.add_argument("--takeover-key", default="c")
     ap.add_argument("--front-camera", default=WORKSPACE_CAM_PATH)
     ap.add_argument("--side-camera", default=SIDE_CAM_PATH)
-    args = ap.parse_args()
+    return ap
 
+
+def validate_args(ap: argparse.ArgumentParser, args: argparse.Namespace) -> bool:
+    """Reject impossible flag combinations before any device is opened.
+
+    Returns whether the run needs the grip feedback controller.
+    """
     if args.duration <= 0.0:
         ap.error("--duration must be positive")
     if args.arm_enabled and args.evidence_dir is None:
@@ -1345,6 +1464,13 @@ def main():
         ap.error("aux/PV control requires --grip-light-pos and --grip-hard-pos from calibration")
     if len(args.takeover_key) != 1:
         ap.error("--takeover-key must be one character")
+    return needs_feedback
+
+
+def main():
+    ap = build_parser()
+    args = ap.parse_args()
+    needs_feedback = validate_args(ap, args)
 
     device = torch.device(args.device)
     print(f"[deploy] loading policy {args.policy} on {device} ...")
@@ -1924,24 +2050,16 @@ def main():
         run_error = f"{type(exc).__name__}: {exc}"
         raise
     finally:
-        if correction_toggle is not None:
-            correction_toggle.close()
-        if stall_operator is not None:
-            stall_operator.close()
-        if paired_operator is not None:
-            paired_operator.close()
-        if grip_intervention is not None:
-            grip_intervention.close()
-        if grip_candidate_trial is not None:
-            grip_candidate_trial.close()
-        if correction_source is not None:
-            correction_source.close()
-        if correction_recorder is not None:
-            if normal_exit:
-                correction_recorder.end_segment()
-            else:
-                correction_recorder.discard_pending()
-            correction_recorder.close()
+        _close_operator_controllers(
+            correction_toggle=correction_toggle,
+            stall_operator=stall_operator,
+            paired_operator=paired_operator,
+            grip_intervention=grip_intervention,
+            grip_candidate_trial=grip_candidate_trial,
+            correction_source=correction_source,
+            correction_recorder=correction_recorder,
+            normal_exit=normal_exit,
+        )
         elapsed = 0.0 if run_started is None else time.perf_counter() - run_started
         if evidence is not None:
             evidence.close(
@@ -1950,80 +2068,11 @@ def main():
                 steps=n,
                 commands_sent=commands_sent,
                 error=run_error,
-                paired_boundaries=(
-                    None
-                    if paired is None
-                    else {
-                        "phase": paired.phase,
-                        "lift_boundary": paired.lift_boundary,
-                        # Read with this: a floor-limited value is the floor
-                        # plus compliance, not the depth the carton lifted at.
-                        # Tightening is only how the carton gets airborne; the
-                        # measurement is the loosen ramp, which resolves 0.5 at
-                        # 90% delivery against tightening's 2.0 at 38%.
-                        "lift_boundary_floor_limited": paired.tighten_ramp.reached_floor,
-                        "tighten_deepest_target": paired.tighten_ramp.deepest_target,
-                        "slip_onset_boundary": paired.slip_onset_boundary,
-                        "drop_boundary": paired.drop_boundary,
-                        "loosen_steps": paired.loosen_steps,
-                        "at_ceiling": paired.at_ceiling,
-                        # A trial that reached neither is not a failed trial,
-                        # it is a trial with nothing to pair. Saying so here
-                        # keeps it out of the paired set without a judgement
-                        # call later.
-                        "paired": (
-                            paired.lift_boundary is not None
-                            and paired.drop_boundary is not None
-                        ),
-                    }
-                ),
-                stall_tighten_result=(
-                    None
-                    if stall_tighten is None
-                    else {
-                        "total_steps_applied": stall_tighten.total_steps_applied,
-                        "reached_floor": stall_tighten.reached_floor,
-                        "lift_boundary": stall_tighten.lift_boundary,
-                        # The deepest the ramp ever commanded, which is the
-                        # squeeze the carton actually took. The baseline
-                        # overshoots the lift boundary by up to one step by
-                        # construction, so this is the reference the
-                        # minimum-sufficient-grip objective has to improve on --
-                        # separately from whether the lift happened at all.
-                        "deepest_target": stall_tighten.deepest_target,
-                    }
-                ),
+                paired_boundaries=_paired_boundaries_summary(paired),
+                stall_tighten_result=_stall_tighten_summary(stall_tighten),
             )
             print(f"[deploy] evidence: {evidence.path}")
-            if stall_tighten is not None:
-                if (
-                    stall_operator is not None
-                    and stall_operator.engaged
-                    and stall_tighten.total_steps_applied
-                ):
-                    # The boundary is recorded when the ramp disengages, so a
-                    # run that ends still engaged loses the one label it went
-                    # out to collect. Say so here rather than letting a null
-                    # column look like "the ramp did nothing".
-                    print(
-                        "[stall ramp] WARNING: the run ended with the ramp still engaged, so "
-                        "lift_boundary was never recorded. Press 't' at the lift next time; "
-                        "recover this one from control.jsonl."
-                    )
-                print(
-                    f"[stall ramp] steps={stall_tighten.total_steps_applied} "
-                    f"lift_boundary={stall_tighten.lift_boundary} "
-                    f"deepest_target={stall_tighten.deepest_target} "
-                    f"reached_floor={stall_tighten.reached_floor}"
-                )
-            if paired is not None:
-                print(
-                    f"[paired] lift={paired.lift_boundary}"
-                    f"{' (FLOOR-LIMITED)' if paired.tighten_ramp.reached_floor else ''} "
-                    f"slip_onset={paired.slip_onset_boundary} "
-                    f"drop={paired.drop_boundary} "
-                    f"loosen_steps={paired.loosen_steps}"
-                )
+            _print_boundary_summary(stall_tighten, stall_operator, paired)
         if connected:
             if args.relax_on_exit:
                 # Every exit, not only the operator's stop. trial10 ran to its
