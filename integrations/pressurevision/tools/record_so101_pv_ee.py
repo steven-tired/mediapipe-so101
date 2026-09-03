@@ -1558,6 +1558,8 @@ def run_recording(args: argparse.Namespace) -> int:
         if dataset_mode == "reset_empty":
             reset_empty_dataset_root(dataset_root)
         open_mode = "create" if dataset_mode == "reset_empty" else dataset_mode
+        # --- 1. Devices: hand camera, OAK, arm, PV pressure source. The order
+        # inside the ExitStack below is load-bearing; see its comments. ---
         cfg = SO101WebcamEEConfig(camera_index=args.hand_camera)
         source = WebcamSource(
             WebcamWristEstimator(
@@ -1598,6 +1600,8 @@ def run_recording(args: argparse.Namespace) -> int:
             )
             motors = list(robot.bus.motors.keys())
             kin = RobotKinematics(urdf_path=str(urdf_path()), target_frame_name="gripper_frame_link", joint_names=motors)
+            # --- 2. Control stack: PV runtime -> gripper adapter -> EE
+            # controller -> teleop. Each one wraps the previous. ---
             pressure_source = _build_pressure_source(args.pv_port)
             resources.callback(pressure_source.close)
             sidecar = PVShadowTelemetryLogger(sidecar_path)
@@ -1640,6 +1644,9 @@ def run_recording(args: argparse.Namespace) -> int:
                 "range_deg": args.wrist_roll_range_deg,
                 "gain": args.wrist_roll_gain,
             }
+            # These six fields are only known once the runtime and the
+            # controller exist, so the manifest is rewritten here rather than
+            # at prepare_evidence_session time.
             evidence._write_manifest()
             positions = _read_positions(robot)
             ee_centre = kin.forward_kinematics(np.array([positions[f"{motor}.pos"] for motor in motors], dtype=float))[:3, 3]
@@ -1661,6 +1668,8 @@ def run_recording(args: argparse.Namespace) -> int:
             )
             robot.attach_recorder(teleop)
             resources.callback(teleop.disconnect)
+            # --- 3. Dataset: feature schema check -> create/resume -> the
+            # mapping contract written beside the episodes. ---
             features = build_training_features(robot)
             image_features = {
                 key for key in features if key.startswith("observation.images.")

@@ -1835,6 +1835,10 @@ def main():
                 pending_action_count = True
             if a.size != len(motors):
                 raise ValueError(f"policy returned {a.size} actions for {len(motors)} motors")
+            # predicted_action is a frozen copy of the policy's raw output; it
+            # feeds the shadow / candidate heads and the evidence rows only. The
+            # `a` below stays in flight and is rewritten by the close offset, the
+            # gripper controllers, and gripper_only before it reaches the bus.
             predicted_action = a.copy()
             a = apply_gripper_close_offset(
                 a,
