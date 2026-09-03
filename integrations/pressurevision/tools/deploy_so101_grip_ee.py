@@ -1193,7 +1193,7 @@ def _print_boundary_summary(stall_tighten, stall_operator, paired) -> None:
             # column look like "the ramp did nothing".
             print(
                 "[stall ramp] WARNING: the run ended with the ramp still engaged, so "
-                "lift_boundary was never recorded. Press 't' at the lift next time; "
+                "lift_boundary was never recorded. Press 'a' at the lift next time; "
                 "recover this one from control.jsonl."
             )
         print(
@@ -1420,10 +1420,17 @@ def validate_args(ap: argparse.ArgumentParser, args: argparse.Namespace) -> bool
             ap.error("--paired-boundaries needs --stall-tighten-step for the tighten branch")
         if args.loosen_step <= 0.0 or args.loosen_interval_s <= 0.0:
             ap.error("--loosen-step and --loosen-interval-s must be positive")
+        if args.correction_dataset_root is not None:
+            # PV takeover wins the gripper elif chain, so paired.update() would
+            # never run: the protocol would sit in its loosening phase holding
+            # freeze_body, and the paused-cycle bookkeeping pushes t_end out
+            # every step, so the duration limit never fires either.
+            ap.error("--paired-boundaries cannot be combined with PV correction recording")
         if args.gripper_telemetry_hz <= 0.0:
             ap.error(
-                "--paired-boundaries requires --gripper-telemetry-hz > 0; the boundaries are "
-                "read back off the bus, not inferred from the command"
+                "--paired-boundaries requires --gripper-telemetry-hz > 0; the boundary "
+                "positions come from the observation, but reviewing one afterwards needs "
+                "the Present_Load and position-lag rows only the telemetry sampler writes"
             )
     if args.stall_tighten_step < 0.0:
         ap.error("--stall-tighten-step must be non-negative")
@@ -1434,6 +1441,12 @@ def validate_args(ap: argparse.ArgumentParser, args: argparse.Namespace) -> bool
             ap.error("the stall ramp requires direct control with zero close offset")
         if args.gripper_only:
             ap.error("the stall ramp reads the ACT body trajectory; it cannot hold the body")
+        if args.stall_tighten_interval_s <= 0.0:
+            ap.error("--stall-tighten-interval-s must be positive")
+        if args.stall_window_s <= 0.0:
+            ap.error("--stall-window-s must be positive")
+        if args.stall_epsilon < 0.0:
+            ap.error("--stall-epsilon must be non-negative")
         if (
             args.grip_intervention_step
             or args.grip_candidate_trial_model is not None
