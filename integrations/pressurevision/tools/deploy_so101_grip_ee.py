@@ -68,7 +68,7 @@ from lerobot_teleoperator_so101_webcam.grip.runtime import (
     append_grip_context,
     pv_teacher_label,
 )
-from lerobot_teleoperator_so101_webcam.gripper_hardware import _read_reg
+from lerobot_teleoperator_so101_webcam.gripper_hardware import _read_reg, read_joint_effort
 
 ARM_ID = os.environ.get("SO101_ARM_ID", "so101_follower_1")
 WORKSPACE_CAM_PATH = os.environ.get(
@@ -1819,6 +1819,12 @@ def main():
                             "present_load": _read_reg(robot, "Present_Load", "gripper"),
                             "position_lag": q_read - q_cmd,
                             "absolute_position_lag": abs(q_read - q_cmd),
+                            # Every joint, because the gripper cannot sense
+                            # payload: it measures the normal force it applies,
+                            # while the carton's weight is a tangential load the
+                            # arm carries. shoulder_lift is where a heavier
+                            # carton shows up, if it shows up anywhere.
+                            "joint_effort": read_joint_effort(robot),
                         }
                         if grip_residual_shadow is not None:
                             shadow_started = time.perf_counter()

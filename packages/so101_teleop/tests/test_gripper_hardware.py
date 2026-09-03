@@ -426,3 +426,55 @@ def test_choose_three_grip_targets_fails_when_current_gaps_are_small():
     ]
     with pytest.raises(ValueError, match="could not find three separated grip targets"):
         choose_three_grip_targets(records, min_current_gap=10.0)
+
+
+def test_joint_effort_reads_every_joint_with_one_transaction_per_register():
+    """The gripper cannot sense payload; the arm joints can."""
+    from lerobot_teleoperator_so101_webcam.gripper_hardware import (
+        JOINT_EFFORT_REGISTERS,
+        read_joint_effort,
+    )
+
+    calls = []
+
+    class Bus:
+        motors = {"shoulder_lift": 2, "elbow_flex": 3, "gripper": 6}
+
+        def sync_read(self, register, **kwargs):
+            calls.append(register)
+            return {motor: 100 + index for index, motor in enumerate(self.motors)}
+
+    effort = read_joint_effort(SimpleNamespace(bus=Bus()))
+    assert calls == list(JOINT_EFFORT_REGISTERS), "one sync_read per register, not per joint"
+    assert set(effort) == {"shoulder_lift", "elbow_flex", "gripper"}
+    assert effort["shoulder_lift"]["Present_Load"] == 100
+
+
+def test_joint_effort_reports_a_register_the_bus_could_not_read_as_missing():
+    from lerobot_teleoperator_so101_webcam.gripper_hardware import read_joint_effort
+
+    class Bus:
+        motors = {"gripper": 6}
+
+        def sync_read(self, register, **kwargs):
+            if register == "Present_Current":
+                raise ConnectionError("no status packet")
+            return {"gripper": 7}
+
+    effort = read_joint_effort(SimpleNamespace(bus=Bus()))
+    assert effort["gripper"]["Present_Load"] == 7
+    assert effort["gripper"]["Present_Current"] is None
+
+
+def test_joint_effort_lets_a_wrong_register_name_raise():
+    """Swallowing this left five dataset columns constant zero."""
+    from lerobot_teleoperator_so101_webcam.gripper_hardware import read_joint_effort
+
+    class Bus:
+        motors = {"gripper": 6}
+
+        def sync_read(self, register, **kwargs):
+            raise KeyError(register)
+
+    with pytest.raises(KeyError):
+        read_joint_effort(SimpleNamespace(bus=Bus()))

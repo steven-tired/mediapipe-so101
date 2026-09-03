@@ -202,6 +202,42 @@ def read_gripper_runtime_telemetry(
     )
 
 
+#: Effort registers read across every joint, not just the gripper.
+JOINT_EFFORT_REGISTERS = ("Present_Load", "Present_Current", "Present_Temperature")
+
+
+def read_joint_effort(robot) -> dict[str, dict[str, int | None]]:
+    """Load, current and temperature for every joint, by register sync_read.
+
+    The gripper servo measures its own closing torque -- the normal force it
+    applies -- and not the tangential load a held object's weight produces. So
+    a carton twice as heavy looks the same to it. The arm joints do carry that
+    weight: `shoulder_lift` holding 250 g and 750 g at one pose differ in
+    current to first order, and that is the only channel on this robot where
+    payload appears at all.
+
+    One sync_read per register rather than six single reads per joint: this bus
+    already drops status packets under load, and eighteen transactions per
+    sample would make that worse for no benefit.
+
+    A register that cannot be read comes back None for every joint rather than
+    raising. A wrong register name still raises -- swallowing that is what left
+    five dataset columns constant zero on 2026-09-02.
+    """
+    readings: dict[str, dict[str, int | None]] = {
+        motor: {} for motor in robot.bus.motors
+    }
+    for register in JOINT_EFFORT_REGISTERS:
+        try:
+            values = robot.bus.sync_read(register, normalize=False, num_retry=3)
+        except BUS_FAULTS:
+            values = {}
+        for motor in readings:
+            raw = values.get(motor)
+            readings[motor][register] = None if raw is None else int(raw)
+    return readings
+
+
 class GripperTelemetrySampler:
     """Rate-limit serial readback and retain the last timestamped sample."""
 
