@@ -202,6 +202,89 @@ def read_gripper_runtime_telemetry(
     )
 
 
+@dataclass(frozen=True)
+class ContactOnset:
+    """Where a closing sweep first shows the object, and how sure that is."""
+
+    index: int | None
+    position: float | None
+    baseline_mean: float
+    baseline_spread: float
+    threshold: float
+
+    @property
+    def detected(self) -> bool:
+        return self.index is not None
+
+
+def find_contact_onset(
+    positions: list[float],
+    efforts: list[float | None],
+    *,
+    baseline_samples: int,
+    sigmas: float = 4.0,
+    consecutive: int = 3,
+) -> ContactOnset:
+    """First sustained rise in effort above the free-space baseline.
+
+    This is the quantity a strain bound needs and a force threshold does not:
+    the jaw position at first contact, x0, against which compression is
+    `x0 - x`. Everything after it is measured in the encoder, so no camera and
+    no force sensor is involved -- effort is used only to locate x0.
+
+    `consecutive` samples are required because one sample above threshold is
+    what this bus does on a dropped packet or a PWM spike. `baseline_samples`
+    must cover free space only; a sweep that starts already touching the object
+    has no baseline and reports nothing rather than reporting the object's own
+    effort as free space.
+
+    Returns a result with `detected` False when no sustained rise was found.
+    That is the answer for hardware whose effort signal is too coarse to see
+    contact, and on this arm it is a real possibility: `Present_Current` spans
+    about sixteen counts and `Present_Load` is quantized to multiples of four.
+    """
+    if len(positions) != len(efforts):
+        raise ValueError("positions and efforts must be the same length")
+    if baseline_samples < 2:
+        raise ValueError("baseline_samples must be at least 2")
+    if consecutive < 1:
+        raise ValueError("consecutive must be at least 1")
+    if len(positions) <= baseline_samples:
+        raise ValueError("the sweep is shorter than its own baseline window")
+
+    baseline = [abs(float(v)) for v in efforts[:baseline_samples] if v is not None]
+    if len(baseline) < 2:
+        raise ValueError("the baseline window has fewer than two readable samples")
+    mean_effort = mean(baseline)
+    spread = max(baseline) - min(baseline)
+    # Peak-to-peak, not a standard deviation: these registers are quantized
+    # coarsely enough that a handful of free-space samples often have sd zero,
+    # which would put the threshold on top of the baseline.
+    threshold = mean_effort + sigmas * max(spread, 1.0)
+
+    run = 0
+    for index in range(baseline_samples, len(efforts)):
+        value = efforts[index]
+        if value is not None and abs(float(value)) >= threshold:
+            run += 1
+            if run >= consecutive:
+                first = index - consecutive + 1
+                return ContactOnset(first, float(positions[first]), mean_effort, spread, threshold)
+        else:
+            run = 0
+    return ContactOnset(None, None, mean_effort, spread, threshold)
+
+
+def compression_strain(contact_pos: float, pos: float, object_width: float) -> float:
+    """Fraction of the object's width the jaw has travelled past first contact.
+
+    The bound a damage-safe stop is set against. Negative before contact.
+    """
+    if not math.isfinite(object_width) or object_width <= 0.0:
+        raise ValueError("object_width must be positive and finite")
+    return (float(contact_pos) - float(pos)) / float(object_width)
+
+
 #: Effort registers read across every joint, not just the gripper.
 JOINT_EFFORT_REGISTERS = ("Present_Load", "Present_Current", "Present_Temperature")
 

@@ -48,6 +48,9 @@ from ..gripper_hardware import (
     DeadbandStep,
     GRIPPER,
     breakout_offset,
+    compression_strain,
+    find_contact_onset,
+    read_joint_effort,
     rank_correlation,
     read_gripper_telemetry,
     readback_spread,
@@ -204,6 +207,82 @@ def _effort_response(records: list[dict]) -> dict[str, float | int]:
     }
 
 
+def probe_contact(robot, *, body, args, started_at, samples) -> dict:
+    """Close slowly from free space into the object and find first contact.
+
+    The measurement a strain bound needs. `x0` is the jaw position where effort
+    first rises above its free-space baseline; compression is then `x0 - x` in
+    the encoder alone, with no camera and no force sensor. Effort is used only
+    to locate x0, never to set a force.
+
+    The sweep must start clear of the object, or there is no free space to take
+    a baseline from and the object's own effort is read as "nothing there".
+    """
+    start = float(robot.get_observation()[f"{GRIPPER}.pos"])
+    if start < args.probe_from:
+        raise RuntimeError(
+            f"gripper is at {start:.2f} but the probe must start open, above "
+            f"--probe-from {args.probe_from:g}: a sweep that begins touching the carton has "
+            "no free space to take a baseline from, and would report the carton's own effort "
+            "as the baseline."
+        )
+
+    print(f"closing {args.probe_from:g} -> {args.probe_to:g} in {args.probe_step:g} steps, "
+          f"{args.probe_dwell_s:g}s each")
+    treads: list[dict] = []
+    commanded = args.probe_from
+    while commanded >= args.probe_to:
+        held = dwell(robot, body=body, gripper_pos=commanded, seconds=args.probe_dwell_s,
+                     hz=args.hz, arm_enabled=args.arm_enabled, started_at=started_at,
+                     max_current=args.max_current, max_temperature=args.max_temperature,
+                     samples=samples)
+        effort = summarize_target_current(held)
+        joints = read_joint_effort(robot) if args.arm_enabled else {}
+        treads.append({
+            "commanded_pos": commanded,
+            "readback": _median_pos(held),
+            "mean_current": effort["mean_current"],
+            "max_current": effort["max_current"],
+            "mean_load": effort["mean_load"],
+            "joint_effort": joints,
+        })
+        print(f"  q_cmd={commanded:7.3f}  q_read={treads[-1]['readback']:7.3f}  "
+              f"current={effort['mean_current']:6.2f}  load={effort['mean_load']:7.2f}")
+        commanded -= args.probe_step
+
+    positions = [tread["readback"] for tread in treads]
+    onsets = {}
+    for channel in ("mean_current", "mean_load"):
+        onset = find_contact_onset(
+            positions,
+            [tread[channel] for tread in treads],
+            baseline_samples=args.probe_baseline,
+            sigmas=args.probe_sigmas,
+        )
+        onsets[channel] = {
+            "detected": onset.detected,
+            "contact_pos": onset.position,
+            "baseline_mean": onset.baseline_mean,
+            "baseline_spread": onset.baseline_spread,
+            "threshold": onset.threshold,
+            "strain_at_deepest": (
+                None if not onset.detected
+                else compression_strain(onset.position, positions[-1], args.object_width)
+            ),
+        }
+        verdict = (
+            f"contact at q={onset.position:.3f}" if onset.detected
+            else "NO detectable contact -- this channel cannot locate x0"
+        )
+        print(f"  {channel}: baseline {onset.baseline_mean:.2f} +/- {onset.baseline_spread:.2f}, "
+              f"threshold {onset.threshold:.2f} -> {verdict}")
+        if onset.detected:
+            print(f"    compression at the deepest tread: "
+                  f"{onset.position - positions[-1]:.3f} deg, strain "
+                  f"{onsets[channel]['strain_at_deepest']:.4f} of {args.object_width:g}")
+    return {"treads": treads, "onsets": onsets, "object_width": args.object_width}
+
+
 def run(args) -> tuple[dict, list]:
     robot = _connect(args.port)
     started_at = time.perf_counter()
@@ -213,7 +292,7 @@ def run(args) -> tuple[dict, list]:
         body = body_hold(robot)
         print(f"gripper readback at start: {start_pos:.3f}")
 
-        if args.close_to is None and start_pos > args.held_below:
+        if args.mode == "deadband" and args.close_to is None and start_pos > args.held_below:
             # A free jaw has a different deadband from a loaded one -- it is
             # the carton that supplies most of the static friction this gate
             # measures -- so calibrating an open gripper would produce a
@@ -225,6 +304,24 @@ def run(args) -> tuple[dict, list]:
                 f"or ACT run. --held-below raises the threshold if this grasp really is above "
                 f"{args.held_below:g}."
             )
+
+        if args.mode == "contact":
+            probe = probe_contact(robot, body=body, args=args, started_at=started_at,
+                                  samples=samples)
+            return {
+                "mode": "contact",
+                "arm_enabled": args.arm_enabled,
+                "port": args.port,
+                "hz": args.hz,
+                "probe_step": args.probe_step,
+                "probe_dwell_s": args.probe_dwell_s,
+                "probe_from": args.probe_from,
+                "probe_to": args.probe_to,
+                "probe_baseline": args.probe_baseline,
+                "probe_sigmas": args.probe_sigmas,
+                "start_readback": start_pos,
+                **probe,
+            }, samples
 
         if not args.yes:
             if not sys.stdin.isatty():
@@ -374,6 +471,10 @@ def _steps(text: str) -> list[float]:
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--mode", choices=("deadband", "contact"), default="deadband",
+                    help="deadband calibrates the smallest resolvable step on a held carton; "
+                         "contact closes slowly from free space and locates first contact, the "
+                         "x0 a compression-strain bound is measured against")
     ap.add_argument("--port", default=ARM_PORT)
     ap.add_argument("--arm-enabled", action="store_true",
                     help="actually command the gripper; without it nothing is sent")
@@ -409,6 +510,22 @@ def main():
     ap.add_argument("--close-dwell-s", type=float, default=0.15, help="dwell per closing waypoint")
     ap.add_argument("--held-below", type=float, default=90.0,
                     help="gripper positions above this read as an empty, open jaw")
+    ap.add_argument("--probe-from", type=float, default=60.0,
+                    help="contact mode: start here, clear of the carton")
+    ap.add_argument("--probe-to", type=float, default=20.0,
+                    help="contact mode: deepest command of the sweep")
+    ap.add_argument("--probe-step", type=float, default=0.25,
+                    help="contact mode: closing increment. Detection itself spends compression, "
+                         "linearly in closing speed, so a fine step buys a tighter x0.")
+    ap.add_argument("--probe-dwell-s", type=float, default=0.8,
+                    help="contact mode: settle time at each tread")
+    ap.add_argument("--probe-baseline", type=int, default=12,
+                    help="contact mode: leading treads treated as free space. They must be: a "
+                         "baseline taken while already touching reads the carton as nothing.")
+    ap.add_argument("--probe-sigmas", type=float, default=4.0,
+                    help="contact mode: multiples of the free-space spread that count as contact")
+    ap.add_argument("--object-width", type=float, default=60.0,
+                    help="contact mode: the carton's width in gripper units, for strain")
     ap.add_argument("--yes", action="store_true", help="skip the 'carton is held' confirmation")
     args = ap.parse_args()
 

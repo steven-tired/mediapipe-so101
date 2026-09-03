@@ -136,3 +136,62 @@ def test_rank_correlation_rejects_mismatched_and_degenerate_input():
         rank_correlation([1.0, 2.0], [1.0])
     with pytest.raises(ValueError):
         rank_correlation([1.0], [1.0])
+
+
+def _sweep(contact_at, *, n=30, free_effort=(2, 3), rise=6.0):
+    """A closing sweep: free space, then effort rising after contact."""
+    positions, efforts = [], []
+    for index in range(n):
+        pos = 60.0 - index * 1.0
+        positions.append(pos)
+        if pos > contact_at:
+            efforts.append(free_effort[index % len(free_effort)])
+        else:
+            efforts.append(free_effort[0] + rise * (contact_at - pos + 1))
+    return positions, efforts
+
+
+def test_contact_onset_is_the_position_where_effort_leaves_free_space():
+    from lerobot_teleoperator_so101_webcam.gripper_hardware import find_contact_onset
+
+    positions, efforts = _sweep(35.0)
+    onset = find_contact_onset(positions, efforts, baseline_samples=12)
+    assert onset.detected
+    assert onset.position == pytest.approx(35.0)
+
+
+def test_a_single_spike_is_not_contact():
+    """One sample over threshold is what this bus does on a dropped packet."""
+    from lerobot_teleoperator_so101_webcam.gripper_hardware import find_contact_onset
+
+    positions, efforts = _sweep(40.0)          # contact at index 20, inside the sweep
+    efforts[15] = 400                          # a spike while still in free space
+    onset = find_contact_onset(positions, efforts, baseline_samples=12, consecutive=3)
+    assert onset.position == pytest.approx(40.0), "the spike must not become the contact point"
+
+
+def test_an_effort_channel_too_flat_to_see_contact_reports_nothing():
+    """The honest answer for Present_Load quantized to multiples of four."""
+    from lerobot_teleoperator_so101_webcam.gripper_hardware import find_contact_onset
+
+    positions = [60.0 - i for i in range(30)]
+    flat = [64] * 30
+    onset = find_contact_onset(positions, flat, baseline_samples=12)
+    assert onset.detected is False
+    assert onset.position is None
+
+
+def test_a_baseline_taken_while_already_touching_is_refused_by_length():
+    from lerobot_teleoperator_so101_webcam.gripper_hardware import find_contact_onset
+
+    with pytest.raises(ValueError):
+        find_contact_onset([1.0, 2.0], [1, 2], baseline_samples=12)
+
+
+def test_strain_is_the_travel_past_contact_over_the_object_width():
+    from lerobot_teleoperator_so101_webcam.gripper_hardware import compression_strain
+
+    assert compression_strain(30.0, 27.0, 60.0) == pytest.approx(0.05)
+    assert compression_strain(30.0, 31.0, 60.0) < 0, "not yet in contact"
+    with pytest.raises(ValueError):
+        compression_strain(30.0, 27.0, 0.0)
