@@ -1390,7 +1390,9 @@ class PVRecorderTeleop(Teleoperator):
         if abs(measured - nominal) / nominal <= 0.05:
             return
         panel_path = self.preview_video_out
-        tmp = panel_path.with_suffix(panel_path.suffix + ".retime")
+        # The suffix must stay .avi: cv2.VideoWriter picks its container from the
+        # extension, and a ".retime" one silently refuses to open.
+        tmp = panel_path.with_name(panel_path.stem + ".retime" + panel_path.suffix)
         try:
             reader = cv2.VideoCapture(str(panel_path))
             width = int(reader.get(cv2.CAP_PROP_FRAME_WIDTH))
