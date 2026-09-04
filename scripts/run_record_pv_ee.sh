@@ -22,6 +22,17 @@ LEVELS="${PV_LEVELS:-}"
 MAPPING="${PV_MAPPING:-carton_span}"
 GRIP_CONTEXT="${PV_GRIP_CONTEXT:-auto}"
 MAX_LEVEL_AGE_MINUTES="${PV_MAX_LEVEL_AGE_MINUTES:-180}"
+# The scene gate stays on by default: the framing a calibration was fit in is what
+# its pressure bands mean, and the same press reads a different band once the crop
+# moves. PV_REQUIRE_SCENE_MATCH=0 downgrades it to the sender's own warning, for
+# footage where the reading is illustrative and no number is being claimed.
+REQUIRE_SCENE_MATCH="${PV_REQUIRE_SCENE_MATCH:-1}"
+SCENE_MATCH_FLAG=(--require-scene-match)
+if [[ "${REQUIRE_SCENE_MATCH}" == "0" ]]; then
+    SCENE_MATCH_FLAG=()
+    echo "PV_REQUIRE_SCENE_MATCH=0: the sender will warn on scene drift instead of refusing;"\
+         " readings from this session describe its own framing only" >&2
+fi
 PROFILE="${PV_OBJECT_PROFILE:-}"
 PV_CAMERA="${PV_CAMERA:-2}"
 PV_CROP="${PV_CROP:-40,0,980,720}"
@@ -157,7 +168,7 @@ trap cleanup EXIT INT TERM
     --camera "${PV_CAMERA}" \
     --crop "${PV_CROP}" \
     --mjpg \
-    --require-scene-match \
+    "${SCENE_MATCH_FLAG[@]}" \
     --max-level-age-minutes "${MAX_LEVEL_AGE_MINUTES}" \
     --log "${SENDER_LOG}" \
     --video-out "${SENDER_VIDEO}" \

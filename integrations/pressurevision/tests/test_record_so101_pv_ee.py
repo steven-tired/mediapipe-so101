@@ -205,7 +205,7 @@ def test_formal_recorder_keeps_wrist_roll_opt_in_until_accuracy_check(tmp_path):
     assert args.wrist_roll_gain == 1.0
 
 
-def test_recorder_layout_has_fixed_four_equal_panels():
+def test_recorder_layout_is_a_fixed_two_by_two_grid():
     panel = recorder.compose_recorder_panel(
         np.zeros((20, 30, 3), dtype=np.uint8),
         np.zeros((10, 10, 3), dtype=np.uint8),
@@ -214,7 +214,7 @@ def test_recorder_layout_has_fixed_four_equal_panels():
         height=40,
         width=50,
     )
-    assert panel.shape == (40, 200, 3)
+    assert panel.shape == (80, 100, 3)   # 2 rows x 2 cols of 40x50
     assert recorder.PANEL_LABELS == (
         "hand-track",
         "shared-memory PV",
@@ -271,6 +271,7 @@ def test_transient_missing_operator_preview_does_not_invalidate_episode():
     teleop.motor_sampler = None
     teleop.pv_preview = argparse.Namespace(read=lambda: None)
     teleop.preview = False
+    teleop.preview_video_out = None
     teleop.episode_active = True
     teleop.episode_valid = True
     teleop.invalid_reason = ""
@@ -418,6 +419,7 @@ def test_recorder_teleop_disconnect_is_idempotent_and_closes_window_first(monkey
     calls = []
     teleop = object.__new__(recorder.PVRecorderTeleop)
     teleop.preview = True
+    teleop._preview_writer = None
     teleop._connected = True
     teleop.source = type("Source", (), {"stop": lambda self: calls.append("source")})()
     teleop.controller = type(
@@ -492,6 +494,7 @@ def test_oak_failure_invalidates_episode_before_using_stale_hand_sample():
 
     teleop = recorder.PVRecorderTeleop.__new__(recorder.PVRecorderTeleop)
     teleop.use_oak = True
+    teleop.preview_video_out = None
     teleop.source = argparse.Namespace(oak_failed=True)
     teleop.controller = Controller()
     teleop.episode_active = True

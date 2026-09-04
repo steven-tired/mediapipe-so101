@@ -408,6 +408,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--wrist-roll-gain", type=float, default=1.0)
     parser.add_argument("--no-oak", action="store_true", help="Use the ordinary webcam instead of OAK-D hand tracking.")
     parser.add_argument("--no-preview", action="store_true", help="Disable the three-pane OpenCV window.")
+    parser.add_argument(
+        "--preview-video-out",
+        type=Path,
+        help="Record the composed hand-track|PV|front|side panel to this .avi. "
+             "Works with --no-preview, so a run can be recorded headless.",
+    )
     parser.add_argument("--check-config", action="store_true")
     parser.add_argument(
         "--stream-preflight",
@@ -852,6 +858,36 @@ def dispose_dataset_session(root: Path | str, backup: Path | str | None, *, keep
         shutil.move(str(backup), str(root))
 
 
+#: Height of the readings strip serve_pad_pressure burns across the top of its
+#: preview panel ("L0/3 p=... sum_kpa=...").
+PV_PANEL_BANNER_PX = 32
+
+
+def pv_overlay_only(frame):
+    """Drop the raw-camera half of the PV preview, keeping the overlay and readings.
+
+    The sender publishes `np.hstack((camera, pressure))` with one readings strip
+    burned across the full width. Both halves show the same fingers, so the raw
+    half is redundant here, but cropping the whole right half would take the
+    readings with it -- the text starts at the far left. So the strip is taken
+    from the left and the image from the right. 2:1 becomes 1.25:1, which is what
+    lets the pane fill its cell instead of sitting in a letterbox.
+
+    The strip goes UNDER the image, not over it: compose_recorder_panel paints a
+    30 px label bar across the top of every pane, and a strip placed on top is
+    hidden by it.
+    """
+    if frame is None:
+        return None
+    image = np.asarray(frame)
+    if image.ndim != 3 or image.shape[1] < 2:
+        return image
+    half = image.shape[1] // 2
+    if image.shape[0] <= PV_PANEL_BANNER_PX:
+        return image[:, half:]
+    return np.vstack((image[PV_PANEL_BANNER_PX:, half:], image[:PV_PANEL_BANNER_PX, :half]))
+
+
 def compose_recorder_panel(
     hand_frame: np.ndarray | None,
     pv_frame: np.ndarray | None,
@@ -861,7 +897,13 @@ def compose_recorder_panel(
     height: int = 480,
     width: int = 640,
 ) -> np.ndarray:
-    """Return the frozen hand / PV / front / side operator layout."""
+    """Return the frozen hand / PV / front / side operator layout, as a 2x2 grid.
+
+    Four panes in a row is 4:1 and unreadable anywhere it is not a 2560-wide
+    window; the same four in 2x2 keep 4:3 and survive being embedded in a page.
+    The pane ORDER is unchanged -- hand and PV on the top row, the two workspace
+    views below -- so PANEL_LABELS still names them in reading order.
+    """
     frames = (hand_frame, pv_frame, front_frame, side_frame)
     panels = []
     for frame, label in zip(frames, PANEL_LABELS):
@@ -877,7 +919,7 @@ def compose_recorder_panel(
         cv2.rectangle(panel, (0, 0), (width, 30), (0, 0, 0), -1)
         cv2.putText(panel, label, (10, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 255), 1, cv2.LINE_AA)
         panels.append(panel)
-    return np.hstack(panels)
+    return np.vstack((np.hstack(panels[:2]), np.hstack(panels[2:])))
 
 
 def workspace_camera_frame(robot, name: str):
@@ -904,7 +946,7 @@ def wait_for_continuous_hand_tracking(
     elapsed_s = 0.0
     if preview:
         cv2.namedWindow(RECORDER_WINDOW, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(RECORDER_WINDOW, 2560, 540)
+        cv2.resizeWindow(RECORDER_WINDOW, 1280, 960)
     print("ARM LOCKED: keep the right hand continuously visible for 3.0 s to enable startup motion.")
     while elapsed_s < HAND_STARTUP_DWELL_S:
         if getattr(source, "oak_failed", False):
@@ -919,7 +961,7 @@ def wait_for_continuous_hand_tracking(
         if preview:
             panel = compose_recorder_panel(
                 sample.preview_frame,
-                pv_preview.read(),
+                pv_overlay_only(pv_preview.read()),
                 workspace_camera_frame(robot, "front"),
                 workspace_camera_frame(robot, "side"),
             )
@@ -1054,7 +1096,7 @@ class PVRecorderTeleop(Teleoperator):
     config_class = SO101WebcamEEConfig
     name = "webcam_ee_joint_pv"
 
-    def __init__(self, config, controller, pv, source, robot, pv_preview, sidecar, evidence, *, preview=True, motor_sampler=None, use_oak=True):
+    def __init__(self, config, controller, pv, source, robot, pv_preview, sidecar, evidence, *, preview=True, preview_video_out=None, motor_sampler=None, use_oak=True):
         super().__init__(config)
         self.config = config
         self.controller = controller
@@ -1068,6 +1110,16 @@ class PVRecorderTeleop(Teleoperator):
         self.sidecar = sidecar
         self.evidence = evidence
         self.preview = bool(preview)
+        #: The composed four-pane panel is the only view that carries the hand
+        #: camera: it is not a dataset feature, so without this the operator's
+        #: half of a run leaves no record at all.
+        self.preview_video_out = None if preview_video_out is None else Path(preview_video_out)
+        self._preview_writer = None
+        #: Wall-clock arrival of every panel frame. The loop does not hold the
+        #: nominal rate -- it runs nearer 8 Hz than 10 -- so a file stamped with
+        #: the nominal rate plays fast, and a demo that plays 25% fast is a demo
+        #: that misrepresents the robot's speed.
+        self._preview_frame_times = []
         self.motor_sampler = motor_sampler
         self.use_oak = bool(use_oak)
         self.temperature_guard = TemperatureGuard()
@@ -1105,7 +1157,7 @@ class PVRecorderTeleop(Teleoperator):
         self.source.start_oak() if self.use_oak else self.source.start(self.config.camera_index)
         if self.preview:
             cv2.namedWindow(self._window, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(self._window, 2560, 540)
+            cv2.resizeWindow(self._window, 1280, 960)
         self._connected = True
 
     def calibrate(self) -> None:
@@ -1226,13 +1278,13 @@ class PVRecorderTeleop(Teleoperator):
             elif anchor is not None:
                 print(f"[pv] adjustment ACTIVE; release PV to lock q<={anchor:.2f}")
 
-        if self.preview:
+        if self.preview or self.preview_video_out is not None:
             hand_frame = self.source.latest_frame()
             front_frame = self._camera_frame("front")
             side_frame = self._camera_frame("side")
             panel = compose_recorder_panel(
                 hand_frame,
-                pv_frame,
+                pv_overlay_only(pv_frame),
                 front_frame,
                 side_frame,
             )
@@ -1265,8 +1317,10 @@ class PVRecorderTeleop(Teleoperator):
                 1,
                 cv2.LINE_AA,
             )
-            cv2.imshow(self._window, panel)
-            self._handle_key(cv2.waitKey(1) & 0xFF)
+            self._write_preview_frame(panel)
+            if self.preview:
+                cv2.imshow(self._window, panel)
+                self._handle_key(cv2.waitKey(1) & 0xFF)
         return joint_action
 
     def finalize_telemetry(self, *, command_sent: bool) -> None:
@@ -1290,7 +1344,81 @@ class PVRecorderTeleop(Teleoperator):
     def send_feedback(self, feedback: dict) -> None:
         return None
 
+    def _write_preview_frame(self, panel) -> None:
+        """Record the composed panel, opening the writer on the first frame.
+
+        The size is not known until a panel exists, so the writer cannot be built
+        in __init__. A writer that refuses to open raises rather than silently
+        dropping the run's only record of the hand camera.
+        """
+        if self.preview_video_out is None:
+            return
+        if self._preview_writer is None:
+            height, width = panel.shape[:2]
+            self.preview_video_out.parent.mkdir(parents=True, exist_ok=True)
+            writer = cv2.VideoWriter(
+                str(self.preview_video_out),
+                cv2.VideoWriter_fourcc(*"MJPG"),
+                float(DEFAULT_FPS),
+                (width, height),
+            )
+            if not writer.isOpened():
+                raise RuntimeError(f"could not open preview writer: {self.preview_video_out}")
+            self._preview_writer = writer
+            print(f"[recorder] preview panel -> {self.preview_video_out}")
+        self._preview_writer.write(panel)
+        self._preview_frame_times.append(time.perf_counter())
+
+    def _measured_preview_fps(self) -> float | None:
+        """Frames per second the panel actually arrived at, or None if too few."""
+        times = self._preview_frame_times
+        if len(times) < 2:
+            return None
+        span = times[-1] - times[0]
+        return None if span <= 0 else (len(times) - 1) / span
+
+    def _retime_preview_video(self) -> None:
+        """Restamp the panel file at the rate it was actually captured.
+
+        Written to a sibling temp file and moved into place, so a failure here
+        leaves the original recording untouched rather than truncated.
+        """
+        measured = self._measured_preview_fps()
+        if measured is None or self.preview_video_out is None:
+            return
+        nominal = float(DEFAULT_FPS)
+        if abs(measured - nominal) / nominal <= 0.05:
+            return
+        panel_path = self.preview_video_out
+        tmp = panel_path.with_suffix(panel_path.suffix + ".retime")
+        try:
+            reader = cv2.VideoCapture(str(panel_path))
+            width = int(reader.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(reader.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            writer = cv2.VideoWriter(
+                str(tmp), cv2.VideoWriter_fourcc(*"MJPG"), measured, (width, height)
+            )
+            if not writer.isOpened():
+                raise RuntimeError(f"could not open {tmp}")
+            while True:
+                ok, frame = reader.read()
+                if not ok:
+                    break
+                writer.write(frame)
+            reader.release()
+            writer.release()
+            os.replace(tmp, panel_path)
+            print(f"[recorder] preview panel retimed {nominal:.1f} -> {measured:.2f} fps")
+        except Exception as exc:
+            tmp.unlink(missing_ok=True)
+            print(f"[recorder] preview retime skipped ({exc}); file plays at {nominal:.1f} fps "
+                  f"but was captured at {measured:.2f}")
+
     def close_preview(self) -> None:
+        if self._preview_writer is not None:
+            self._preview_writer.release()
+            self._preview_writer = None
+            self._retime_preview_video()
         if self.preview:
             self.preview = False
             cv2.destroyAllWindows()
@@ -1663,6 +1791,7 @@ def run_recording(args: argparse.Namespace) -> int:
                 sidecar,
                 evidence,
                 preview=not args.no_preview,
+                preview_video_out=args.preview_video_out,
                 motor_sampler=motor_sampler,
                 use_oak=not args.no_oak,
             )
