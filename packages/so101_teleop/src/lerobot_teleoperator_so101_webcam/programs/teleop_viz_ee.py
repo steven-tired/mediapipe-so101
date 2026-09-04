@@ -8,9 +8,9 @@ lost hand = HOLD; pinch = gripper.
 Control lives in the SHARED `WebcamEEController` (same code the recorder uses), so live teleop and
 recording can't diverge. Runs the robot with use_degrees=True. Keep the e-stop within reach.
 
-Run (stop other camera apps first; default = laptop webcam index 0):
+Run (stop other camera apps first; default = OAK-D stereo depth):
   env -u PYTHONPATH QT_QPA_PLATFORM=xcb python -m lerobot_teleoperator_so101_webcam.programs.teleop_viz_ee
-Add --oak to use the OAK-D (clean stereo depth) instead of the monocular webcam.
+Add --no-oak to fall back to the monocular webcam (CAMERA_INDEX) when no OAK-D is attached.
 
 To RECORD a dataset, use record_so101_ee.py (LeRobot record_loop) -- not this script.
 """
@@ -89,7 +89,9 @@ def disconnect_robot_safely(robot) -> None:
 
 
 def main():
-    use_oak = "--oak" in sys.argv
+    # OAK-D by default: its stereo depth is metric, where the monocular fallback
+    # only infers scale. --no-oak is the escape when the device is not attached.
+    use_oak = "--no-oak" not in sys.argv
     cfg = SO101WebcamEEConfig(camera_index=CAMERA_INDEX)
     robot = SOFollower(SO101FollowerConfig(
         port=ARM_PORT, id=ARM_ID, use_degrees=True,
@@ -136,7 +138,7 @@ def main():
     controller.seed(obs0)
     print(f"EE centre (ready FK): {np.round(ee_centre, 3)}  down rotvec: {np.round(controller.r_down, 3)}")
 
-    # Camera + depth source: --oak uses the OAK-D (clean stereo depth); default = laptop webcam.
+    # Camera + depth source: the OAK-D (clean stereo depth) unless --no-oak asked for the webcam.
     if use_oak:
         from webcam_input.depth import OAKDepthStrategy
         from webcam_input.oak_camera import OAKCamera
