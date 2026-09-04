@@ -508,6 +508,97 @@ once. Expect no jump in the gripper command across either keypress.
 Record each item as PASS or FAIL here in the format the sections above use, and
 **leave the gate open if any item fails.** Partial success is not a pass.
 
+## ACT deploy configuration — closed-loop stall, 2026-09-03
+
+Found while shooting deployment footage with `act_carton_middle_labels_2k`
+(`local/training_runs/phase_c_recovery_minimal/act_middle_labels_20260826_attempt01/checkpoints/002000`).
+The checkpoint is the one `training/TRAINING_HANDOFF.md` selects on held-out
+middle episodes (body MAE 1.355). Armed deployment with the saved configuration
+**does not act on the carton at all**, and no offline metric shows it.
+
+### What was observed
+
+`run04` (`--arm-enabled --start-mode ready --duration 40`, evidence in
+`local/evidence/portfolio_s2/run04`): 396 steps at 9.9 Hz, `error: null`. The
+commanded trajectory ramps in the first four seconds and then stops:
+
+| t (s) | shoulder_lift | elbow_flex | gripper |
+| --- | --- | --- | --- |
+| 0.2 | -4.3 | 5.7 | 53.7 |
+| 4.1 | -62.4 | 58.7 | 99.3 |
+| 12.2 | -56.3 | 52.2 | 99.6 |
+| 20.2 | -56.2 | 52.0 | 99.7 |
+| 28.3 | -54.9 | 50.5 | 99.8 |
+
+The arm lifts clear of the table, opens the gripper fully, and holds there for
+some 25 seconds. Front-camera frames at t=3, 10 and 26 s are indistinguishable.
+It never descends and never closes. This is not a hardware fault: commanded
+spans were 63 deg on elbow_flex and 63 deg on shoulder_lift, inference held at
+19 ms, and the loop kept 9.9 Hz.
+
+### The cause
+
+The checkpoint's `config.json` carries `chunk_size: 20`, `n_action_steps: 1`,
+`temporal_ensemble_coeff: null`. The control log confirms what that means in
+closed loop: 396 steps produced **396 distinct chunk ids, one executed step
+each**, `policy_execution_index` never left 0, and `denormalized_chunk` had
+length 1. Every step predicts a 20-step chunk, keeps the first action, discards
+nineteen, and re-plans from a fresh observation.
+
+With no temporal ensembling that is a fixed point. A near-identical observation
+yields a near-identical first action, the arm does not move, and the next
+observation is the same again. ACT's chunk carries its commitment in the actions
+after the first; taking only the first, without ensembling across overlapping
+chunks, discards it.
+
+The contrast is the checkpoint whose deployment this audit already records as
+PASS (§ "3. Deployment"): `act_pickplace` has `chunk_size: 50`,
+`n_action_steps: 1`, **`temporal_ensemble_coeff: 0.01`**. Both execute one action
+per inference; only the working one averages across chunks.
+
+### What changed the behaviour
+
+`deploy_so101_grip_ee.py` already exposes `--act-action-steps`, which sets
+`policy.config.n_action_steps` and calls `policy.reset()` so the action queue is
+rebuilt at the new length. Re-run as
+`--act-action-steps 14 --action-step-repeat 2 --max-steps 300`
+(`local/evidence/portfolio_s2/run11`), the same checkpoint approached, closed the
+gripper from 100 to 31 between t=6 and t=10 s, held 22-32, and lifted the carton.
+Two runs stalled under the saved configuration; the run under the changed one did
+the task. **That is n=1 against n=2 and is not a controlled comparison** — the
+carton was also repositioned between them.
+
+### What this costs
+
+- Execution ran at **0.5x trajectory speed** (`--action-step-repeat 2`, 5.0 Hz
+  against the 10 Hz the demos were recorded at). Any figure taken from `run11`
+  must say so.
+- `n_action_steps: 14` is **not** what the checkpoint was saved with. A run that
+  cites this policy has to name the deploy-time override with it.
+- The lift in `run11` is an **operator observation, not an instrument reading**.
+  The side camera cannot measure it: the carton exceeds the frame at both top and
+  bottom and the background wall shares its colour, so both edge-tracking attempts
+  returned degenerate values.
+
+### Why nothing caught it
+
+The selection metric is offline body MAE on held-out episodes, which replays
+recorded observations and never closes the loop, so a self-locking action rule
+scores normally. No test in `packages/` or `integrations/` runs a policy against
+its own commanded motion. The gap belongs with the failure shape this repository
+already tracks: a defensible-looking default (`n_action_steps: 1`) turning a
+policy that has something to say into one that silently repeats itself.
+
+### Still open
+
+- Whether temporal ensembling or chunk execution is the right fix here, and at
+  what value. Only `14` was tried, and only once.
+- Whether the stall reproduces with the carton in the training pose. The two
+  stalled runs and the successful one did not share a carton placement.
+- Whether the other Phase C checkpoints (`act_carton_phase_c_80k`,
+  `diffusion_carton_phase_c_90k`, `smolvla_carton_phase_c_80k`) carry the same
+  configuration. Not checked.
+
 ## Environment note
 
 The LeRobot venv carried three editable installs pointing into the pre-split
