@@ -86,9 +86,9 @@ It is **not approved for autonomous deployment**: on the arm it produced real
 lifts and also no-lift, slip and no-release outcomes. A from-scratch control on
 the same data is a documented NO-GO.
 
-Everything above except the two pick-place policies is **private**, as is this
-repository, so those links 404 for anyone without access. Publishing is a
-separate decision and `docs/RELEASE_AUDIT.md` records it as not taken.
+This repository and every dataset and policy linked above are public as of
+September 2026. `docs/RELEASE_AUDIT.md` records the audit that preceded the
+release (it was written while the repository was still private).
 
 **Read `docs/CLAIMS_AND_GATES.md` and `docs/RELEASE_AUDIT.md` before citing any
 result from this repository.** They separate what has run on the arm from what has
